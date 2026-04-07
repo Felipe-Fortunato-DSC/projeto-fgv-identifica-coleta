@@ -1,9 +1,10 @@
 """
 Script para geração de dados fictícios de coleta de produtos.
-Cria o banco SQLite com duas tabelas:
-  - coleta_produtos: dados brutos do scraping
-  - produtos_referencia: mapeamento id_produto -> cod_bp
-  - coleta_fts: índice FTS5 para busca textual eficiente
+Cria o banco SQLite com as tabelas:
+  - coleta_produtos        : dados brutos do scraping
+  - coleta_cadastrado_BP   : cadastro de cod_insumo e insumo_informado por informante/produto
+  - produtos_referencia    : mapeamento id_produto -> cod_bp
+  - coleta_fts             : índice FTS5 para busca textual eficiente
 """
 
 import sqlite3
@@ -30,11 +31,6 @@ MARCAS = [
     "Natura", "L'Oréal", "Samsung", "LG", "Heinz", "Quaker",
 ]
 
-CATEGORIAS = [
-    "Alimentos", "Bebidas", "Higiene", "Limpeza",
-    "Eletrônicos", "Vestuário", "Pet", "Farmácia",
-]
-
 DESCRICOES_BASE = [
     "Sabão em Pó", "Detergente Líquido", "Shampoo", "Condicionador",
     "Café Torrado e Moído", "Açúcar Cristal", "Farinha de Trigo",
@@ -48,6 +44,15 @@ DESCRICOES_BASE = [
     "Cereal Matinal", "Amaciante Roupas", "Desinfetante",
 ]
 
+TIPOS_PRECO    = ["Varejo", "Atacado", "Promoção", "Lista", "Negociado"]
+PERIODICIDADES = ["Diária", "Semanal", "Quinzenal", "Mensal"]
+MOEDAS         = ["BRL", "USD", "EUR"]
+UFS            = [
+    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA",
+    "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN",
+    "RS", "RO", "RR", "SC", "SP", "SE", "TO",
+]
+
 TAMANHOS = [
     "200ml", "500ml", "1L", "2L", "1kg", "500g",
     "250g", "5kg", "3kg", "100g", "1,5L", "400g",
@@ -55,11 +60,11 @@ TAMANHOS = [
 
 DOMINIOS = {
     "Mercado Livre": "mercadolivre.com.br",
-    "Amazon": "amazon.com.br",
-    "Shopee": "shopee.com.br",
-    "Americanas": "americanas.com.br",
-    "Magazine Luiza": "magazineluiza.com.br",
-    "Casas Bahia": "casasbahia.com.br",
+    "Amazon":        "amazon.com.br",
+    "Shopee":        "shopee.com.br",
+    "Americanas":    "americanas.com.br",
+    "Magazine Luiza":"magazineluiza.com.br",
+    "Casas Bahia":   "casasbahia.com.br",
 }
 
 
@@ -96,17 +101,28 @@ def criar_schema(cur: sqlite3.Cursor) -> None:
             plataforma        TEXT,
             cod_informante    TEXT,
             nome_informante   TEXT,
-            categoria         TEXT,
+            periodicidade     TEXT,
+            tipo_preco        TEXT,
             ean               TEXT,
             sku               TEXT,
             url               TEXT,
             descricao         TEXT,
             marca             TEXT,
+            uf                TEXT,
+            moeda             TEXT,
             preco             REAL,
             preco_promocional REAL,
             id_produto        TEXT,
             id_coleta         TEXT,
             id_imagem         TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS coleta_cadastrado_BP (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            cod_informante    TEXT NOT NULL,
+            id_produto        TEXT NOT NULL,
+            cod_insumo        TEXT,
+            insumo_informado  INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS produtos_referencia (
@@ -130,46 +146,94 @@ def criar_schema(cur: sqlite3.Cursor) -> None:
 
 def popular_coleta(cur: sqlite3.Cursor, n: int = 500) -> list:
     """Insere n produtos na tabela coleta_produtos."""
-    data_inicio = datetime(2024, 1, 1)
+    data_inicio = datetime(2024, 5, 1)
     linhas = []
 
     for i in range(1, n + 1):
-        plataforma = random.choice(PLATAFORMAS)
+        plataforma   = random.choice(PLATAFORMAS)
         cod_inf, nome_inf = random.choice(INFORMANTES)
-        categoria = random.choice(CATEGORIAS)
-        marca = random.choice(MARCAS)
-        desc_base = random.choice(DESCRICOES_BASE)
-        tamanho = random.choice(TAMANHOS)
-        descricao = f"{desc_base} {marca} {tamanho}"
-        ean = gerar_ean()
-        sku = gerar_sku(plataforma, i)
-        url = gerar_url(plataforma, sku)
+        marca        = random.choice(MARCAS)
+        desc_base    = random.choice(DESCRICOES_BASE)
+        tamanho      = random.choice(TAMANHOS)
+        descricao    = f"{desc_base} {marca} {tamanho}"
+        ean          = gerar_ean()
+        sku          = gerar_sku(plataforma, i)
+        url          = gerar_url(plataforma, sku)
         preco, preco_promo = gerar_preco()
-        data_coleta = (
-            data_inicio + timedelta(days=random.randint(0, 364))
+        periodicidade = random.choice(PERIODICIDADES)
+        tipo_preco   = random.choice(TIPOS_PRECO)
+        uf           = random.choice(UFS)
+        moeda        = random.choice(MOEDAS)
+        data_coleta  = (
+            data_inicio + timedelta(days=random.randint(0, 730))
         ).strftime("%Y-%m-%d")
-        id_produto = f"PROD{i:06d}"
-        id_coleta = f"COL{random.randint(1000, 9999)}"
-        id_imagem = f"IMG{random.randint(10000, 99999)}"
+        id_produto   = f"PROD{i:06d}"
+        id_coleta    = f"COL{random.randint(1000, 9999)}"
+        id_imagem    = f"IMG{random.randint(10000, 99999)}"
 
         linhas.append((
-            data_coleta, plataforma, cod_inf, nome_inf, categoria,
-            ean, sku, url, descricao, marca, preco, preco_promo,
-            id_produto, id_coleta, id_imagem,
+            data_coleta, plataforma, cod_inf, nome_inf, periodicidade, tipo_preco,
+            ean, sku, url, descricao, marca, uf, moeda,
+            preco, preco_promo, id_produto, id_coleta, id_imagem,
         ))
 
     cur.executemany(
         """
         INSERT INTO coleta_produtos
-            (data_coleta, plataforma, cod_informante, nome_informante, categoria,
-             ean, sku, url, descricao, marca, preco, preco_promocional,
-             id_produto, id_coleta, id_imagem)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (data_coleta, plataforma, cod_informante, nome_informante, periodicidade, tipo_preco,
+             ean, sku, url, descricao, marca, uf, moeda,
+             preco, preco_promocional, id_produto, id_coleta, id_imagem)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         linhas,
     )
-    print(f"  coleta_produtos  : {n} registros inseridos")
-    return [row[12] for row in linhas]  # lista de id_produto
+    print(f"  coleta_produtos     : {n} registros inseridos")
+    # Retorna lista de (cod_informante, id_produto)
+    return [(row[2], row[15]) for row in linhas]
+
+
+def popular_cadastrado_bp(cur: sqlite3.Cursor, pares: list) -> None:
+    """
+    Popula coleta_cadastrado_BP com três cenários:
+      - 40% : cod_insumo + insumo_informado preenchidos
+      - 30% : apenas cod_insumo preenchido
+      - 30% : nenhum dos dois (linha existe mas campos nulos)
+    """
+    random.shuffle(pares)
+    n = len(pares)
+    corte1 = int(n * 0.40)
+    corte2 = int(n * 0.70)
+
+    registros = []
+    for idx, (cod_inf, id_prod) in enumerate(pares):
+        if idx < corte1:
+            # ambos preenchidos
+            cod_insumo       = f"INS{random.randint(10000, 99999)}"
+            insumo_informado = random.randint(100000, 999999)
+        elif idx < corte2:
+            # só cod_insumo
+            cod_insumo       = f"INS{random.randint(10000, 99999)}"
+            insumo_informado = None
+        else:
+            # nenhum
+            cod_insumo       = None
+            insumo_informado = None
+
+        registros.append((cod_inf, id_prod, cod_insumo, insumo_informado))
+
+    cur.executemany(
+        """
+        INSERT INTO coleta_cadastrado_BP
+            (cod_informante, id_produto, cod_insumo, insumo_informado)
+        VALUES (?,?,?,?)
+        """,
+        registros,
+    )
+    c_ambos = sum(1 for r in registros if r[2] and r[3])
+    c_so    = sum(1 for r in registros if r[2] and not r[3])
+    c_none  = sum(1 for r in registros if not r[2])
+    print(f"  coleta_cadastrado_BP: {len(registros)} registros "
+          f"(ambos={c_ambos}, só cod_insumo={c_so}, sem código={c_none})")
 
 
 def popular_referencia(cur: sqlite3.Cursor) -> None:
@@ -181,8 +245,7 @@ def popular_referencia(cur: sqlite3.Cursor) -> None:
 
     refs = []
     for id_prod, desc, marca in prods:
-        n_bp = random.randint(1, 3)
-        for _ in range(n_bp):
+        for _ in range(random.randint(1, 3)):
             cod_bp = f"BP{random.randint(100000, 999999)}"
             refs.append((id_prod, cod_bp, desc, marca))
 
@@ -190,7 +253,7 @@ def popular_referencia(cur: sqlite3.Cursor) -> None:
         "INSERT INTO produtos_referencia (id_produto, cod_bp, descricao, marca) VALUES (?,?,?,?)",
         refs,
     )
-    print(f"  produtos_referencia: {len(refs)} registros inseridos")
+    print(f"  produtos_referencia : {len(refs)} registros inseridos")
 
 
 def popular_fts(cur: sqlite3.Cursor) -> None:
@@ -198,7 +261,7 @@ def popular_fts(cur: sqlite3.Cursor) -> None:
         "INSERT INTO coleta_fts(rowid, id_produto, descricao, marca) "
         "SELECT id, id_produto, descricao, marca FROM coleta_produtos"
     )
-    print("  coleta_fts       : índice FTS5 criado")
+    print("  coleta_fts          : índice FTS5 criado")
 
 
 def main():
@@ -216,7 +279,8 @@ def main():
     criar_schema(cur)
 
     print("Inserindo dados...")
-    popular_coleta(cur, n=500)
+    pares = popular_coleta(cur, n=500)
+    popular_cadastrado_bp(cur, pares)
     popular_referencia(cur)
     popular_fts(cur)
 

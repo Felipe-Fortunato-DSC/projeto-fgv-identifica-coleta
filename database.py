@@ -1,6 +1,7 @@
 """
 Camada de acesso a dados — consultas ao SQLite com filtros dinâmicos
 e busca textual via FTS5.
+Cod_insumo e insumo_informado são buscados via LEFT JOIN em coleta_cadastrado_BP.
 """
 
 import re
@@ -15,17 +16,55 @@ DB_PATH = Path(__file__).parent / "data" / "database.db"
 # Colunas visíveis ao usuário (ordem de exibição)
 VISIBLE_COLUMNS = [
     "data_coleta",
+    "plataforma",
     "cod_informante",
     "nome_informante",
+    "periodicidade",
+    "tipo_preco",
+    "cod_insumo",        # vem de coleta_cadastrado_BP
     "ean",
     "sku",
+    "insumo_informado",  # vem de coleta_cadastrado_BP
     "url",
     "descricao",
     "marca",
+    "uf",
+    "moeda",
     "preco",
     "preco_promocional",
     "id_produto",
+    "id_coleta",
+    "id_imagem",
 ]
+
+# SELECT base com JOIN — garante cod_insumo e insumo_informado da tabela de cadastro
+_BASE_SELECT = """
+    SELECT
+        cp.data_coleta,
+        cp.plataforma,
+        cp.cod_informante,
+        cp.nome_informante,
+        cp.periodicidade,
+        cp.tipo_preco,
+        cb.cod_insumo,
+        cp.ean,
+        cp.sku,
+        cb.insumo_informado,
+        cp.url,
+        cp.descricao,
+        cp.marca,
+        cp.uf,
+        cp.moeda,
+        cp.preco,
+        cp.preco_promocional,
+        cp.id_produto,
+        cp.id_coleta,
+        cp.id_imagem
+    FROM coleta_produtos cp
+    LEFT JOIN coleta_cadastrado_BP cb
+        ON cb.cod_informante = cp.cod_informante
+        AND cb.id_produto    = cp.id_produto
+"""
 
 
 @contextmanager
@@ -45,7 +84,7 @@ def get_filter_options() -> dict:
     """Retorna listas de valores únicos para os filtros de seleção."""
     with get_conn() as conn:
         options: dict = {}
-        for col in ("cod_informante", "nome_informante", "marca"):
+        for col in ("cod_informante", "nome_informante", "marca", "tipo_preco", "uf"):
             df = pd.read_sql_query(
                 f"SELECT DISTINCT {col} FROM coleta_produtos "
                 f"WHERE {col} IS NOT NULL ORDER BY {col}",
@@ -79,49 +118,51 @@ def _sanitize_fts(text: str) -> str:
 
 def _build_query(filters: dict) -> tuple[str, list]:
     """
-    Monta a query SQL para os filtros informados.
+    Monta a query SQL (com JOIN) para os filtros informados.
     Retorna (sql, params).
     """
-    base = (
-        "SELECT " + ", ".join(VISIBLE_COLUMNS) + " FROM coleta_produtos"
-    )
     conditions: list[str] = []
     params: list = []
 
     if filters.get("cod_informante"):
-        conditions.append("cod_informante = ?")
+        conditions.append("cp.cod_informante = ?")
         params.append(filters["cod_informante"])
 
     if filters.get("nome_informante"):
-        conditions.append("nome_informante = ?")
+        conditions.append("cp.nome_informante = ?")
         params.append(filters["nome_informante"])
 
     if filters.get("marca"):
-        conditions.append("marca = ?")
+        conditions.append("cp.marca = ?")
         params.append(filters["marca"])
 
-    if filters.get("data_inicio") and filters.get("data_fim"):
-        conditions.append("data_coleta BETWEEN ? AND ?")
-        params.append(str(filters["data_inicio"]))
-        params.append(str(filters["data_fim"]))
+    if filters.get("tipo_preco"):
+        conditions.append("cp.tipo_preco = ?")
+        params.append(filters["tipo_preco"])
+
+    if filters.get("uf"):
+        conditions.append("cp.uf = ?")
+        params.append(filters["uf"])
+
+    if filters.get("data_apos"):
+        conditions.append("cp.data_coleta >= ?")
+        params.append(str(filters["data_apos"]))
 
     if filters.get("ean_sku"):
         term = filters["ean_sku"].strip()
-        conditions.append("(ean = ? OR sku = ?)")
+        conditions.append("(cp.ean = ? OR cp.sku = ?)")
         params.extend([term, term])
 
     if filters.get("busca_texto"):
         fts = _sanitize_fts(filters["busca_texto"])
         if fts:
             conditions.append(
-                "id IN ("
-                "  SELECT rowid FROM coleta_fts WHERE coleta_fts MATCH ?"
-                ")"
+                "cp.id IN (SELECT rowid FROM coleta_fts WHERE coleta_fts MATCH ?)"
             )
             params.append(fts)
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    return base + where, params
+    return _BASE_SELECT + where, params
 
 
 # ---------------------------------------------------------------------------
@@ -135,15 +176,14 @@ def get_total_count(filters: dict) -> int:
         return cur.fetchone()[0]
 
 
-def get_page_data(filters: dict, page: int, page_size: int = 20) -> pd.DataFrame:
+def get_page_data(filters: dict, page: int, page_size: int = 10) -> pd.DataFrame:
     sql, params = _build_query(filters)
-    sql += " ORDER BY data_coleta DESC LIMIT ? OFFSET ?"
+    sql += " ORDER BY cp.data_coleta DESC LIMIT ? OFFSET ?"
     params += [page_size, (page - 1) * page_size]
 
     with get_conn() as conn:
         df = pd.read_sql_query(sql, conn, params=params)
 
-    # Conversão de tipos
     df["data_coleta"] = pd.to_datetime(df["data_coleta"], errors="coerce").dt.date
     return df
 
@@ -164,9 +204,9 @@ def get_data_by_ids(ids: list[str]) -> pd.DataFrame:
 
     placeholders = ",".join("?" * len(ids))
     sql = (
-        "SELECT " + ", ".join(VISIBLE_COLUMNS)
-        + f" FROM coleta_produtos WHERE id_produto IN ({placeholders})"
-        + " ORDER BY data_coleta DESC"
+        _BASE_SELECT
+        + f" WHERE cp.id_produto IN ({placeholders})"
+        + " ORDER BY cp.data_coleta DESC"
     )
     with get_conn() as conn:
         df = pd.read_sql_query(sql, conn, params=ids)

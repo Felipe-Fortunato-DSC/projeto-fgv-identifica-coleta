@@ -17,16 +17,25 @@ from openpyxl.utils import get_column_letter
 # Mapeamento coluna -> rótulo amigável (mesmo da exibição)
 COLUMN_LABELS = {
     "data_coleta": "Data Coleta",
+    "plataforma": "Plataforma",
     "cod_informante": "Cód. Informante",
     "nome_informante": "Nome Informante",
+    "periodicidade": "Periodicidade",
+    "tipo_preco": "Tipo Preço",
+    "cod_insumo": "Cód. Insumo",
     "ean": "EAN",
     "sku": "SKU",
+    "insumo_informado": "Insumo Informado",
     "url": "URL",
     "descricao": "Descrição",
     "marca": "Marca",
+    "uf": "UF",
+    "moeda": "Moeda",
     "preco": "Preço (R$)",
     "preco_promocional": "Preço Promo (R$)",
     "id_produto": "ID Produto",
+    "id_coleta": "ID Coleta",
+    "id_imagem": "ID Imagem",
 }
 
 HEADER_BG = "1B4F72"   # azul escuro

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Pipeline de Dados — Fluxograma</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0f1117;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 20px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+
+    header h1 {
+      font-size: 1.9rem;
+      font-weight: 700;
+      color: #f0f0f0;
+      letter-spacing: 0.5px;
+    }
+
+    header p {
+      margin-top: 8px;
+      color: #6b7280;
+      font-size: 0.95rem;
+      letter-spacing: 0.3px;
+    }
+
+    .card {
+      background: #16181f;
+      border: 1px solid #2a2d3a;
+      border-radius: 20px;
+      padding: 48px 64px;
+      box-shadow: 0 8px 48px rgba(0,0,0,0.5);
+      max-width: 1100px;
+      width: 100%;
+    }
+
+    .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+
+    /* Legenda */
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      justify-content: center;
+      margin-top: 40px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.8rem;
+      color: #9ca3af;
+    }
+
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Pipeline de Dados — Identificação de Insumos</h1>
+    <p>Fluxo completo desde a coleta até a disponibilização final</p>
+  </header>
+
+  <div class="card">
+    <div class="mermaid">
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "background": "#16181f",
+    "primaryColor": "#1e2130",
+    "primaryTextColor": "#f0f0f0",
+    "primaryBorderColor": "#3b4060",
+    "lineColor": "#4b5280",
+    "secondaryColor": "#1a1d2e",
+    "tertiaryColor": "#1a1d2e",
+    "edgeLabelBackground": "#16181f",
+    "clusterBkg": "#1a1d2e"
+  },
+  "flowchart": { "curve": "monotoneX", "nodeSpacing": 60, "rankSpacing": 70 }
+}}%%
+flowchart TD
+    A("🌐  Coleta de Dados\nWebscraping"):::collect
+    B[("☁️  Armazenamento\nS3")]:::storage
+    C("🔍  Disponibilização Inicial\nAthena"):::athena
+    D("🖥️  Aplicativo de\nIdentificação de Insumos"):::app
+    E("🔎  Aplicativo de\nAuditoria de Coleta"):::audit
+    F("📋  Especificação\nde Insumos"):::spec
+    G("🗄️  Cadastro no\nBanco de Preços"):::cadastro
+    H[("☁️  Armazenamento\nS3")]:::storage
+    I("📊  Disponibilização Final\nAthena"):::athena_final
+
+    A --> B
+    B --> C
+    C --> D
+    C -. "Ramo de Auditoria" .-> E
+    D --> F
+    F --> G
+    G --> H
+    H --> I
+
+    classDef collect   fill:#1a3a5c,stroke:#3b82f6,stroke-width:2px,color:#93c5fd,rx:12
+    classDef storage   fill:#1a2e1a,stroke:#22c55e,stroke-width:2px,color:#86efac,rx:12
+    classDef athena    fill:#2d1f4a,stroke:#a855f7,stroke-width:2px,color:#d8b4fe,rx:12
+    classDef athena_final fill:#1f3d3d,stroke:#06b6d4,stroke-width:2px,color:#67e8f9,rx:12
+    classDef app       fill:#3a1f1f,stroke:#f97316,stroke-width:2px,color:#fdba74,rx:12
+    classDef audit     fill:#3a2a10,stroke:#eab308,stroke-width:2px,color:#fde047,rx:12
+    classDef spec      fill:#1f2a3a,stroke:#60a5fa,stroke-width:2px,color:#bfdbfe,rx:12
+    classDef cadastro  fill:#2a1f3a,stroke:#c084fc,stroke-width:2px,color:#e9d5ff,rx:12
+
+    linkStyle 3 stroke:#eab308,stroke-width:2px,stroke-dasharray:6
+    </div>
+
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>Coleta / Web</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>Armazenamento S3</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#a855f7"></div>Disponibilização (Athena)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#f97316"></div>Aplicativo Principal</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#eab308"></div>Auditoria (ramo secundário)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#60a5fa"></div>Especificação</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#c084fc"></div>Cadastro / Banco de Preços</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#06b6d4"></div>Disponibilização Final</div>
+    </div>
+  </div>
+
+  <script>
+    mermaid.initialize({ startOnLoad: true, securityLevel: 'loose' });
+  </script>
+</body>
+</html>
