@@ -45,7 +45,7 @@ _BASE_SELECT = f"""
     SELECT
         cp.data_coleta,
         cp.plataforma,
-        cp.cod_informante,
+        element_at(cp.cod_informante, 1) AS cod_informante,
         cp.nome_informante,
         cp.periodicidade,
         cp.tipo_preco,
@@ -65,8 +65,8 @@ _BASE_SELECT = f"""
         cp.id_imagem
     FROM {TABLE_COLETA} cp
     LEFT JOIN {TABLE_CADASTRO} cb
-        ON cb.cod_informante = cp.cod_informante
-        AND cb.id_produto    = cp.id_produto
+        ON CAST(cb.cod_informante AS VARCHAR) = element_at(cp.cod_informante, 1)
+        AND cb.id_produto_site                = cp.id_produto
 """
 
 
@@ -97,12 +97,19 @@ def _run_query(sql: str, params: list | None = None) -> pd.DataFrame:
 def get_filter_options() -> dict:
     """Retorna listas de valores únicos para os filtros de seleção."""
     options: dict = {}
-    for col in ("cod_informante", "nome_informante", "marca", "tipo_preco", "uf"):
+    for col in ("nome_informante", "marca", "tipo_preco", "uf"):
         df = _run_query(
             f"SELECT DISTINCT {col} FROM {TABLE_COLETA} "
             f"WHERE {col} IS NOT NULL ORDER BY {col}"
         )
         options[col] = df[col].tolist()
+
+    df = _run_query(
+        f"SELECT DISTINCT element_at(cod_informante, 1) AS cod_informante "
+        f"FROM {TABLE_COLETA} WHERE cod_informante IS NOT NULL "
+        f"ORDER BY cod_informante"
+    )
+    options["cod_informante"] = df["cod_informante"].tolist()
 
     row = _run_query(
         f"SELECT MIN(data_coleta) AS mn, MAX(data_coleta) AS mx FROM {TABLE_COLETA}"
@@ -126,7 +133,7 @@ def _build_query(filters: dict) -> tuple[str, list]:
     params: list = []
 
     if filters.get("cod_informante"):
-        conditions.append("cp.cod_informante = %s")
+        conditions.append("element_at(cp.cod_informante, 1) = %s")
         params.append(filters["cod_informante"])
 
     if filters.get("nome_informante"):
@@ -176,9 +183,15 @@ def get_total_count(filters: dict) -> int:
 def get_page_data(filters: dict, page: int, page_size: int = 10) -> pd.DataFrame:
     sql, params = _build_query(filters)
     offset = (page - 1) * page_size
-    sql += f" ORDER BY cp.data_coleta DESC LIMIT {page_size} OFFSET {offset}"
+    sql = (
+        f"SELECT * FROM ("
+        f"  SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.data_coleta DESC) AS _rn"
+        f"  FROM ({sql}) t"
+        f") WHERE _rn > {offset} AND _rn <= {offset + page_size}"
+    )
 
     df = _run_query(sql, params)
+    df = df.drop(columns=["_rn"], errors="ignore")
     df["data_coleta"] = pd.to_datetime(df["data_coleta"], errors="coerce").dt.date
     return df
 
@@ -186,7 +199,7 @@ def get_page_data(filters: dict, page: int, page_size: int = 10) -> pd.DataFrame
 def get_all_filtered_ids(filters: dict) -> list[str]:
     """Retorna todos os id_produto correspondentes aos filtros (sem paginação)."""
     sql, params = _build_query(filters)
-    df = _run_query(f"SELECT cp.id_produto FROM ({sql}) t", params)
+    df = _run_query(f"SELECT id_produto FROM ({sql}) t", params)
     return df["id_produto"].tolist()
 
 
