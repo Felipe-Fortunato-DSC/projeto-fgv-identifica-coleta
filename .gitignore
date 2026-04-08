@@ -32,5 +32,8 @@ data/database.db
 Thumbs.db
 desktop.ini
 
+# Variáveis de ambiente (credenciais)
+.env
+
 # Arquivos de exportação gerados
 *.xlsx

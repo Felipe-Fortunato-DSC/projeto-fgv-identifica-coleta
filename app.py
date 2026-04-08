@@ -5,12 +5,15 @@ Aplicação Streamlit para consulta, filtro e exportação de dados de scraping.
 
 import hashlib
 import math
-import sqlite3
+import os
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
 
 from auth import (
     change_password,
@@ -21,7 +24,6 @@ from auth import (
     verify_login,
 )
 from database import (
-    DB_PATH,
     get_all_filtered_ids,
     get_data_by_ids,
     get_filter_options,
@@ -542,19 +544,6 @@ def _render_export() -> None:
 # ---------------------------------------------------------------------------
 
 def _data_page() -> None:
-    # Verifica se a tabela de coleta existe
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='coleta_produtos'"
-        ).fetchone()
-
-    if not has_table:
-        st.error(
-            "Tabela de coleta não encontrada. "
-            "Execute `python generate_data.py` para criar os dados."
-        )
-        return
-
     _render_banner()
 
     # Placeholder para métricas — renderizado acima dos filtros
