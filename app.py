@@ -86,7 +86,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-PAGE_SIZE = 10
+PAGE_SIZE = 30
 
 
 _TIPO_LABEL = {
@@ -391,8 +391,11 @@ def _render_metrics(placeholder, total: int) -> None:
 # ---------------------------------------------------------------------------
 
 def _render_selection_controls(filters: dict, total: int) -> None:
-    all_ids = set(get_all_filtered_ids(filters)) if total > 0 else set()
-    all_selected = bool(all_ids) and all_ids.issubset(st.session_state.selected_ids)
+    # Calcula estado atual sem ir ao Athena: compara ids já na session com os da página
+    all_selected = (
+        total > 0
+        and len(st.session_state.selected_ids) >= total
+    )
 
     checked = st.checkbox(
         "Selecionar todos os produtos filtrados",
@@ -401,11 +404,14 @@ def _render_selection_controls(filters: dict, total: int) -> None:
     )
 
     if checked and not all_selected:
+        # Só busca todos os ids quando o usuário marca o checkbox
+        with st.spinner("Selecionando todos..."):
+            all_ids = set(get_all_filtered_ids(filters)) if total > 0 else set()
         st.session_state.selected_ids.update(all_ids)
         st.session_state.table_version += 1
         st.rerun()
     elif not checked and all_selected:
-        st.session_state.selected_ids -= all_ids
+        st.session_state.selected_ids.clear()
         st.session_state.table_version += 1
         st.rerun()
 
@@ -469,7 +475,7 @@ def _render_table(df: pd.DataFrame) -> None:
         hide_index=True,
         use_container_width=True,
         key=_table_key(st.session_state.page, st.session_state.table_version),
-        height=min(36 + len(display) * 35, 36 + PAGE_SIZE * 35),
+        height=36 + len(display) * 35,
     )
 
     page_ids = set(df["id_produto"])
@@ -557,9 +563,13 @@ def _data_page() -> None:
         st.session_state.page = 1
         st.session_state.last_filters_hash = filters_hash
 
-    with st.spinner("Carregando dados..."):
-        total = get_total_count(filters)
-        page_df = get_page_data(filters, st.session_state.page, PAGE_SIZE)
+    try:
+        with st.spinner("Carregando dados..."):
+            total = get_total_count(filters)
+            page_df = get_page_data(filters, st.session_state.page, PAGE_SIZE)
+    except Exception as e:
+        st.error(f"Erro ao consultar Athena: {e}")
+        return
 
     _render_metrics(metrics_placeholder, total)
     _render_export()
@@ -656,6 +666,8 @@ def _management_page() -> None:
 @st.cache_data(ttl=300)
 def _get_filter_options_cached() -> dict:
     return get_filter_options()
+
+
 
 
 # ---------------------------------------------------------------------------
