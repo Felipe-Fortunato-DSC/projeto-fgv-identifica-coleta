@@ -1,19 +1,20 @@
 """
 Camada de acesso a dados — consultas ao AWS Athena com filtros dinâmicos.
-Cod_insumo e insumo_informado são buscados via LEFT JOIN em tb_teste_bp.
+Cod_insumo e insumo_informado são buscados via LEFT JOIN em tbl_cadastrados_bp.
 """
 
 import os
 from contextlib import contextmanager
+from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
 from pyathena import connect
 
-ATHENA_S3_STAGING_DIR = os.environ["ATHENA_S3_STAGING_DIR"]
-ATHENA_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+load_dotenv(Path(__file__).parent / ".env")
 
 TABLE_COLETA   = "db_scraping_spdo.tbl_ecommerce_spdo"
-TABLE_CADASTRO = "db_scraping_spdo.tb_teste_bp"
+TABLE_CADASTRO = "db_scraping_spdo.tbl_cadastrados_bp"
 
 VISIBLE_COLUMNS = [
     "data_coleta", "plataforma", "cod_informante", "nome_informante",
@@ -54,8 +55,8 @@ _BASE_SELECT = f"""
 @contextmanager
 def get_conn():
     conn = connect(
-        s3_staging_dir=ATHENA_S3_STAGING_DIR,
-        region_name=ATHENA_REGION,
+        s3_staging_dir=os.environ["ATHENA_S3_STAGING_DIR"],
+        region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
         work_group="primary",
     )
     try:
@@ -90,11 +91,17 @@ def get_filter_options() -> dict:
         options[col] = df[col].tolist()
 
     df = _run_query(
-        f"SELECT DISTINCT element_at(cod_informante, 1) AS cod_informante "
+        f"SELECT element_at(cod_informante, 1) AS cod_informante, "
+        f"MAX(data_coleta) AS ultima_coleta "
         f"FROM {TABLE_COLETA} WHERE cod_informante IS NOT NULL "
+        f"GROUP BY element_at(cod_informante, 1) "
         f"ORDER BY cod_informante"
     )
     options["cod_informante"] = df["cod_informante"].tolist()
+    options["ultima_coleta_by_informante"] = {
+        row["cod_informante"]: str(row["ultima_coleta"])
+        for _, row in df.iterrows()
+    }
 
     row = _run_query(
         f"SELECT MIN(data_coleta) AS mn, MAX(data_coleta) AS mx FROM {TABLE_COLETA}"
@@ -183,3 +190,18 @@ def get_data_by_ids(ids: list[str]) -> pd.DataFrame:
     df = _run_query(sql)
     df["data_coleta"] = pd.to_datetime(df["data_coleta"], errors="coerce").dt.date
     return df
+
+
+def save_cadastrado_bp(
+    cod_informante: str,
+    id_produto_site: str,
+    cod_insumo: str,
+    insumo_informado: str,
+) -> None:
+    sql = f"""
+        INSERT INTO {TABLE_CADASTRO} (cod_informante, cod_insumo, insumo_informado, id_produto_site)
+        VALUES ({_escape(cod_informante)}, {_escape(cod_insumo)}, {_escape(insumo_informado)}, {_escape(id_produto_site)})
+    """
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql)

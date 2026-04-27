@@ -29,6 +29,7 @@ from database import (
     get_filter_options,
     get_page_data,
     get_total_count,
+    save_cadastrado_bp,
 )
 from export import export_to_excel
 
@@ -258,6 +259,27 @@ def _render_sidebar_authenticated() -> None:
 def _render_filters(options: dict) -> dict:
     sfx = st.session_state.filter_suffix
 
+    # Pré-seleciona o primeiro informante e sua última data na primeira renderização
+    first_cod = options["cod_informante"][0] if options["cod_informante"] else None
+    date_key = f"f_data_{sfx}"
+    if date_key not in st.session_state and first_cod:
+        latest = options.get("ultima_coleta_by_informante", {}).get(first_cod)
+        if latest:
+            st.session_state[date_key] = date.fromisoformat(latest)
+
+    # Callback: atualiza a data quando o informante muda
+    st.session_state["_filter_options_ref"] = options
+
+    def _on_informante_change():
+        opts = st.session_state.get("_filter_options_ref", {})
+        _sfx = st.session_state.filter_suffix
+        cod = st.session_state.get(f"f_cod_{_sfx}", "")
+        _date_key = f"f_data_{_sfx}"
+        if cod:
+            latest = opts.get("ultima_coleta_by_informante", {}).get(cod)
+            if latest:
+                st.session_state[_date_key] = date.fromisoformat(latest)
+
     cod_inf = nome_inf = marca = ean_sku = busca_texto = tipo_preco = uf = ""
     data_coleta = None
 
@@ -274,10 +296,13 @@ def _render_filters(options: dict) -> dict:
         col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
 
         with col1:
+            default_cod_idx = 1 if options["cod_informante"] else 0
             cod_inf = st.selectbox(
                 "Cód. Informante",
                 options=[""] + options["cod_informante"],
+                index=default_cod_idx,
                 key=f"f_cod_{sfx}",
+                on_change=_on_informante_change,
             )
             ean_sku = st.text_input(
                 "EAN / SKU",
@@ -546,6 +571,64 @@ def _render_export() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cadastro no Banco de Preços
+# ---------------------------------------------------------------------------
+
+def _render_cadastro_bp(page_df: pd.DataFrame) -> None:
+    selected_ids = st.session_state.selected_ids
+    if len(selected_ids) != 1:
+        return
+
+    prod_id = next(iter(selected_ids))
+
+    row_df = page_df[page_df["id_produto"] == prod_id]
+    if row_df.empty:
+        try:
+            row_df = get_data_by_ids([prod_id])
+        except Exception:
+            return
+    if row_df.empty:
+        return
+
+    row = row_df.iloc[0]
+    cod_informante = str(row["cod_informante"])
+    id_produto_site = str(row["id_produto"])
+
+    st.divider()
+    with st.expander("📋 Cadastrar no Banco de Preços", expanded=True):
+        st.markdown(
+            f"**Produto:** {row['descricao']}  \n"
+            f"**Cód. Informante:** `{cod_informante}` &nbsp;|&nbsp; "
+            f"**ID Produto:** `{id_produto_site}`",
+            unsafe_allow_html=True,
+        )
+
+        with st.form("form_cadastro_bp"):
+            col1, col2 = st.columns(2)
+            with col1:
+                cod_insumo = st.text_input("Cód. Insumo *", placeholder="Ex: 1234")
+            with col2:
+                insumo_informado = st.text_input(
+                    "Insumo Informado *", placeholder="Ex: Farinha de Trigo"
+                )
+
+            if st.form_submit_button("💾 Salvar no Banco de Preços", type="primary"):
+                if not cod_insumo.strip() or not insumo_informado.strip():
+                    st.error("Preencha todos os campos obrigatórios.")
+                else:
+                    try:
+                        save_cadastrado_bp(
+                            cod_informante,
+                            id_produto_site,
+                            cod_insumo.strip(),
+                            insumo_informado.strip(),
+                        )
+                        st.success("Registro salvo com sucesso na tabela tbl_cadastrados_bp.")
+                    except Exception as e:
+                        st.error(f"Erro ao salvar: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Página de Dados
 # ---------------------------------------------------------------------------
 
@@ -576,6 +659,7 @@ def _data_page() -> None:
     _render_selection_controls(filters, total)
     _render_table(page_df)
     _render_pagination(total)
+    _render_cadastro_bp(page_df)
 
 
 # ---------------------------------------------------------------------------
