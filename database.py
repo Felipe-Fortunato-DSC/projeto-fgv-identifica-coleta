@@ -158,7 +158,14 @@ def _build_where(filters: dict) -> str:
     if filters.get("insumo_informado"):
         conditions.append(f"cb.insumo_informado = {_escape(filters['insumo_informado'])}")
     if filters.get("cadastrados_bp"):
-        conditions.append("cb.cod_insumo IS NOT NULL")
+        conditions.append(
+            f"EXISTS ("
+            f"SELECT 1 FROM {TABLE_CADASTRO} cb2 "
+            f"WHERE CAST(cb2.cod_informante AS VARCHAR) = element_at(cp.cod_informante, 1) "
+            f"AND cb2.id_produto_site = cp.id_produto "
+            f"AND cb2.cod_insumo IS NOT NULL"
+            f")"
+        )
     if filters.get("ean_sku"):
         term = filters["ean_sku"].strip()
         conditions.append(f"(cp.ean = {_escape(term)} OR cp.sku = {_escape(term)})")
