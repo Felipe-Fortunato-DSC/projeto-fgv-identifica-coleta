@@ -27,8 +27,7 @@ from database import (
     get_all_filtered_ids,
     get_data_by_ids,
     get_filter_options,
-    get_page_data,
-    get_total_count,
+    get_page_data_with_count,
     save_cadastrado_bp,
 )
 from export import export_to_excel
@@ -106,10 +105,14 @@ def _init_state() -> None:
         "login_view": "login",   # "login" | "change_password"
         "current_view": "data",  # "data"  | "management"
         "selected_ids": set(),
+        "pending_edits": {},
         "page": 1,
         "table_version": 0,
         "filter_suffix": 0,
         "filters_open": False,
+        "page_cache_key": None,
+        "page_cache_df": None,
+        "page_cache_total": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -279,6 +282,10 @@ def _render_filters(options: dict) -> dict:
             latest = opts.get("ultima_coleta_by_informante", {}).get(cod)
             if latest:
                 st.session_state[_date_key] = date.fromisoformat(latest)
+        st.session_state.selected_ids = set()
+        st.session_state.pending_edits = {}
+        st.session_state.page = 1
+        st.session_state.page_cache_key = None
 
     cod_inf = nome_inf = marca = ean_sku = busca_texto = tipo_preco = uf = ""
     data_coleta = None
@@ -458,7 +465,7 @@ COLUMN_CONFIG = {
     "cod_insumo": st.column_config.TextColumn("Cód. Insumo", width="small"),
     "ean": st.column_config.TextColumn("EAN", width="medium"),
     "sku": st.column_config.TextColumn("SKU", width="medium"),
-    "insumo_informado": st.column_config.NumberColumn("Insumo Informado", width="small"),
+    "insumo_informado": st.column_config.TextColumn("Insumo Informado", width="medium"),
     "url": st.column_config.LinkColumn("URL", width="medium"),
     "descricao": st.column_config.TextColumn("Descrição", width="large"),
     "marca": st.column_config.TextColumn("Marca", width="small"),
@@ -475,8 +482,8 @@ COLUMN_CONFIG = {
 
 DISABLED_COLS = [
     "data_coleta", "plataforma", "cod_informante", "nome_informante",
-    "periodicidade", "tipo_preco", "cod_insumo", "ean", "sku",
-    "insumo_informado", "url", "descricao", "marca", "uf", "moeda",
+    "periodicidade", "tipo_preco", "ean", "sku",
+    "url", "descricao", "marca", "uf", "moeda",
     "preco", "preco_promocional", "id_produto", "id_coleta", "id_imagem",
 ]
 
@@ -490,7 +497,16 @@ def _render_table(df: pd.DataFrame) -> None:
         st.info("Nenhum produto encontrado com os filtros aplicados.")
         return
 
+    # Aplica edições pendentes antes de renderizar
     display = df.copy()
+    pending = st.session_state.pending_edits
+    for prod_id, edits in pending.items():
+        mask = display["id_produto"] == prod_id
+        if mask.any():
+            for col in ("cod_insumo", "insumo_informado"):
+                if col in edits:
+                    display.loc[mask, col] = edits[col]
+
     display.insert(0, "Sel", display["id_produto"].isin(st.session_state.selected_ids))
 
     edited = st.data_editor(
@@ -503,10 +519,33 @@ def _render_table(df: pd.DataFrame) -> None:
         height=36 + len(display) * 35,
     )
 
+    # Detecta alterações em cod_insumo / insumo_informado
+    new_pending = dict(pending)
+    for _, erow in edited.iterrows():
+        prod_id = erow["id_produto"]
+        orig = display[display["id_produto"] == prod_id]
+        if orig.empty:
+            continue
+        orig_row = orig.iloc[0]
+        row_edits = {}
+        for col in ("cod_insumo", "insumo_informado"):
+            e_val = str(erow[col]).strip() if pd.notna(erow[col]) else ""
+            o_val = str(orig_row[col]).strip() if pd.notna(orig_row[col]) else ""
+            if e_val != o_val:
+                row_edits[col] = str(erow[col]).strip() if pd.notna(erow[col]) else ""
+        if row_edits:
+            new_pending[prod_id] = {
+                "cod_informante": str(erow["cod_informante"]),
+                **new_pending.get(prod_id, {}),
+                **row_edits,
+            }
+    if new_pending != pending:
+        st.session_state.pending_edits = new_pending
+
+    # Trata alterações de seleção
     page_ids = set(df["id_produto"])
     sel_on_page = set(edited.loc[edited["Sel"], "id_produto"])
     desel_on_page = page_ids - sel_on_page
-
     new_selected = (st.session_state.selected_ids - desel_on_page) | sel_on_page
 
     if new_selected != st.session_state.selected_ids:
@@ -571,61 +610,47 @@ def _render_export() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cadastro no Banco de Preços
+# Salvar cadastros pendentes
 # ---------------------------------------------------------------------------
 
-def _render_cadastro_bp(page_df: pd.DataFrame) -> None:
-    selected_ids = st.session_state.selected_ids
-    if len(selected_ids) != 1:
+def _render_save_pending() -> None:
+    pending = st.session_state.pending_edits
+    if not pending:
         return
 
-    prod_id = next(iter(selected_ids))
+    n = len(pending)
+    c1, c2, _ = st.columns([3, 2, 7])
+    with c1:
+        st.info(f"{n} item(ns) com cadastro pendente")
+    with c2:
+        if st.button("💾 Salvar Cadastros", type="primary", use_container_width=True):
+            errors = []
+            saved = 0
+            for prod_id, edits in list(pending.items()):
+                cod_insumo = str(edits.get("cod_insumo", "")).strip()
+                insumo_informado = str(edits.get("insumo_informado", "")).strip()
+                if not cod_insumo or not insumo_informado:
+                    errors.append(f"{prod_id}: preencha cod_insumo e insumo_informado")
+                    continue
+                try:
+                    save_cadastrado_bp(
+                        edits["cod_informante"],
+                        prod_id,
+                        cod_insumo,
+                        insumo_informado,
+                    )
+                    saved += 1
+                except Exception as e:
+                    errors.append(f"{prod_id}: {e}")
 
-    row_df = page_df[page_df["id_produto"] == prod_id]
-    if row_df.empty:
-        try:
-            row_df = get_data_by_ids([prod_id])
-        except Exception:
-            return
-    if row_df.empty:
-        return
-
-    row = row_df.iloc[0]
-    cod_informante = str(row["cod_informante"])
-    id_produto_site = str(row["id_produto"])
-
-    st.divider()
-    with st.expander("📋 Cadastrar no Banco de Preços", expanded=True):
-        st.markdown(
-            f"**Produto:** {row['descricao']}  \n"
-            f"**Cód. Informante:** `{cod_informante}` &nbsp;|&nbsp; "
-            f"**ID Produto:** `{id_produto_site}`",
-            unsafe_allow_html=True,
-        )
-
-        with st.form("form_cadastro_bp"):
-            col1, col2 = st.columns(2)
-            with col1:
-                cod_insumo = st.text_input("Cód. Insumo *", placeholder="Ex: 1234")
-            with col2:
-                insumo_informado = st.text_input(
-                    "Insumo Informado *", placeholder="Ex: Farinha de Trigo"
-                )
-
-            if st.form_submit_button("💾 Salvar no Banco de Preços", type="primary"):
-                if not cod_insumo.strip() or not insumo_informado.strip():
-                    st.error("Preencha todos os campos obrigatórios.")
-                else:
-                    try:
-                        save_cadastrado_bp(
-                            cod_informante,
-                            id_produto_site,
-                            cod_insumo.strip(),
-                            insumo_informado.strip(),
-                        )
-                        st.success("Registro salvo com sucesso na tabela tbl_cadastrados_bp.")
-                    except Exception as e:
-                        st.error(f"Erro ao salvar: {e}")
+            if saved:
+                st.success(f"{saved} registro(s) salvo(s) com sucesso.")
+                st.session_state.pending_edits = {}
+                st.session_state.page_cache_key = None
+                st.session_state.table_version += 1
+                st.rerun()
+            for err in errors:
+                st.error(err)
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +660,6 @@ def _render_cadastro_bp(page_df: pd.DataFrame) -> None:
 def _data_page() -> None:
     _render_banner()
 
-    # Placeholder para métricas — renderizado acima dos filtros
     metrics_placeholder = st.empty()
 
     options = _get_filter_options_cached()
@@ -645,21 +669,31 @@ def _data_page() -> None:
     if st.session_state.get("last_filters_hash") != filters_hash:
         st.session_state.page = 1
         st.session_state.last_filters_hash = filters_hash
+        st.session_state.page_cache_key = None
 
-    try:
-        with st.spinner("Carregando dados..."):
-            total = get_total_count(filters)
-            page_df = get_page_data(filters, st.session_state.page, PAGE_SIZE)
-    except Exception as e:
-        st.error(f"Erro ao consultar Athena: {e}")
-        return
+    cache_key = f"{filters_hash}_{st.session_state.page}"
+    if st.session_state.page_cache_key == cache_key:
+        page_df = st.session_state.page_cache_df
+        total = st.session_state.page_cache_total
+    else:
+        try:
+            with st.spinner("Carregando dados..."):
+                page_df, total = get_page_data_with_count(
+                    filters, st.session_state.page, PAGE_SIZE
+                )
+            st.session_state.page_cache_key = cache_key
+            st.session_state.page_cache_df = page_df
+            st.session_state.page_cache_total = total
+        except Exception as e:
+            st.error(f"Erro ao consultar Athena: {e}")
+            return
 
     _render_metrics(metrics_placeholder, total)
     _render_export()
     _render_selection_controls(filters, total)
+    _render_save_pending()
     _render_table(page_df)
     _render_pagination(total)
-    _render_cadastro_bp(page_df)
 
 
 # ---------------------------------------------------------------------------

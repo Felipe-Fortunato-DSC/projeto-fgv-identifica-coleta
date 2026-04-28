@@ -151,25 +151,24 @@ def _build_query(filters: dict) -> str:
 # Consultas públicas
 # ---------------------------------------------------------------------------
 
-def get_total_count(filters: dict) -> int:
-    sql = _build_query(filters)
-    df = _run_query(f"SELECT COUNT(*) AS cnt FROM ({sql}) t")
-    return int(df["cnt"].iloc[0])
-
-
-def get_page_data(filters: dict, page: int, page_size: int) -> pd.DataFrame:
-    sql = _build_query(filters)
+def get_page_data_with_count(
+    filters: dict, page: int, page_size: int
+) -> tuple[pd.DataFrame, int]:
+    base_sql = _build_query(filters)
     offset = (page - 1) * page_size
-    paginated = f"""
+    sql = f"""
         SELECT * FROM (
-            SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.data_coleta DESC) AS _rn
-            FROM ({sql}) t
+            SELECT t.*,
+                   ROW_NUMBER() OVER (ORDER BY t.data_coleta DESC) AS _rn,
+                   COUNT(*) OVER ()                                 AS _total
+            FROM ({base_sql}) t
         ) WHERE _rn > {offset} AND _rn <= {offset + page_size}
     """
-    df = _run_query(paginated)
-    df = df.drop(columns=["_rn"], errors="ignore")
+    df = _run_query(sql)
+    total = int(df["_total"].iloc[0]) if not df.empty else 0
+    df = df.drop(columns=["_rn", "_total"], errors="ignore")
     df["data_coleta"] = pd.to_datetime(df["data_coleta"], errors="coerce").dt.date
-    return df
+    return df, total
 
 
 def get_all_filtered_ids(filters: dict) -> list[str]:
