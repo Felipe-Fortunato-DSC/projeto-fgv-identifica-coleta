@@ -105,7 +105,7 @@ def _init_state() -> None:
         "login_view": "login",   # "login" | "change_password"
         "current_view": "data",  # "data"  | "management"
         "selected_ids": set(),
-        "pending_edits": {},
+        "filter_cadastrados_bp": False,
         "page": 1,
         "table_version": 0,
         "filter_suffix": 0,
@@ -262,15 +262,6 @@ def _render_sidebar_authenticated() -> None:
 def _render_filters(options: dict) -> dict:
     sfx = st.session_state.filter_suffix
 
-    # Pré-seleciona o primeiro informante e sua última data na primeira renderização
-    first_cod = options["cod_informante"][0] if options["cod_informante"] else None
-    date_key = f"f_data_{sfx}"
-    if date_key not in st.session_state and first_cod:
-        latest = options.get("ultima_coleta_by_informante", {}).get(first_cod)
-        if latest:
-            st.session_state[date_key] = date.fromisoformat(latest)
-
-    # Callback: atualiza a data quando o informante muda
     st.session_state["_filter_options_ref"] = options
 
     def _on_informante_change():
@@ -283,7 +274,10 @@ def _render_filters(options: dict) -> dict:
             if latest:
                 st.session_state[_date_key] = date.fromisoformat(latest)
         st.session_state.selected_ids = set()
-        st.session_state.pending_edits = {}
+        st.session_state.pop("last_table_edited", None)
+        st.session_state.pop("last_table_original", None)
+        st.session_state.filter_cadastrados_bp = False
+        st.session_state["toggle_cadastrados_bp"] = False
         st.session_state.page = 1
         st.session_state.page_cache_key = None
 
@@ -291,23 +285,27 @@ def _render_filters(options: dict) -> dict:
     data_coleta = None
 
     with st.expander("🔍 Filtros", expanded=False):
-        # Botão limpar no topo direito
         th1, th2 = st.columns([9, 1])
         with th2:
             if st.button("Limpar Filtro", key=f"limpar_{sfx}", use_container_width=True):
                 st.session_state.filter_suffix += 1
                 st.session_state.page = 1
                 st.session_state.table_version += 1
+                st.session_state.selected_ids = set()
+                st.session_state.pop("last_table_edited", None)
+                st.session_state.pop("last_table_original", None)
+                st.session_state.filter_cadastrados_bp = False
+                st.session_state["toggle_cadastrados_bp"] = False
+                st.session_state.page_cache_key = None
                 st.rerun()
 
         col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
 
         with col1:
-            default_cod_idx = 1 if options["cod_informante"] else 0
             cod_inf = st.selectbox(
                 "Cód. Informante",
                 options=[""] + options["cod_informante"],
-                index=default_cod_idx,
+                index=0,
                 key=f"f_cod_{sfx}",
                 on_change=_on_informante_change,
             )
@@ -350,7 +348,7 @@ def _render_filters(options: dict) -> dict:
             data_min = date.fromisoformat(options["data_min"])
             data_max = date.fromisoformat(options["data_max"])
             data_coleta = st.date_input(
-                "Dados Coletados a Partir de",
+                "Data da Coleta",
                 value=None,
                 min_value=data_min,
                 max_value=data_max,
@@ -374,7 +372,7 @@ def _render_filters(options: dict) -> dict:
     if busca_texto.strip():
         filters["busca_texto"] = busca_texto.strip()
     if data_coleta:
-        filters["data_apos"] = data_coleta
+        filters["data_exata"] = data_coleta
 
     return filters
 
@@ -419,33 +417,22 @@ def _render_metrics(placeholder, total: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Controles de seleção
+# Toggle — filtrar cadastrados BP
 # ---------------------------------------------------------------------------
 
-def _render_selection_controls(filters: dict, total: int) -> None:
-    # Calcula estado atual sem ir ao Athena: compara ids já na session com os da página
-    all_selected = (
-        total > 0
-        and len(st.session_state.selected_ids) >= total
-    )
+def _render_cadastrados_bp_toggle() -> None:
+    def _on_toggle():
+        st.session_state.filter_cadastrados_bp = st.session_state["toggle_cadastrados_bp"]
+        st.session_state.page = 1
+        st.session_state.page_cache_key = None
 
-    checked = st.checkbox(
-        "Selecionar todos os produtos filtrados",
-        value=all_selected,
-        key=f"chk_all_{st.session_state.table_version}",
+    st.toggle(
+        "Cadastrados BP",
+        value=st.session_state.filter_cadastrados_bp,
+        key="toggle_cadastrados_bp",
+        on_change=_on_toggle,
+        help="Filtrar apenas produtos já cadastrados no Banco de Preços",
     )
-
-    if checked and not all_selected:
-        # Só busca todos os ids quando o usuário marca o checkbox
-        with st.spinner("Selecionando todos..."):
-            all_ids = set(get_all_filtered_ids(filters)) if total > 0 else set()
-        st.session_state.selected_ids.update(all_ids)
-        st.session_state.table_version += 1
-        st.rerun()
-    elif not checked and all_selected:
-        st.session_state.selected_ids.clear()
-        st.session_state.table_version += 1
-        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -497,16 +484,7 @@ def _render_table(df: pd.DataFrame) -> None:
         st.info("Nenhum produto encontrado com os filtros aplicados.")
         return
 
-    # Aplica edições pendentes antes de renderizar
     display = df.copy()
-    pending = st.session_state.pending_edits
-    for prod_id, edits in pending.items():
-        mask = display["id_produto"] == prod_id
-        if mask.any():
-            for col in ("cod_insumo", "insumo_informado"):
-                if col in edits:
-                    display.loc[mask, col] = edits[col]
-
     display.insert(0, "Sel", display["id_produto"].isin(st.session_state.selected_ids))
 
     edited = st.data_editor(
@@ -519,28 +497,9 @@ def _render_table(df: pd.DataFrame) -> None:
         height=36 + len(display) * 35,
     )
 
-    # Detecta alterações em cod_insumo / insumo_informado
-    new_pending = dict(pending)
-    for _, erow in edited.iterrows():
-        prod_id = erow["id_produto"]
-        orig = display[display["id_produto"] == prod_id]
-        if orig.empty:
-            continue
-        orig_row = orig.iloc[0]
-        row_edits = {}
-        for col in ("cod_insumo", "insumo_informado"):
-            e_val = str(erow[col]).strip() if pd.notna(erow[col]) else ""
-            o_val = str(orig_row[col]).strip() if pd.notna(orig_row[col]) else ""
-            if e_val != o_val:
-                row_edits[col] = str(erow[col]).strip() if pd.notna(erow[col]) else ""
-        if row_edits:
-            new_pending[prod_id] = {
-                "cod_informante": str(erow["cod_informante"]),
-                **new_pending.get(prod_id, {}),
-                **row_edits,
-            }
-    if new_pending != pending:
-        st.session_state.pending_edits = new_pending
+    # Armazena estado atual para uso no botão de salvar
+    st.session_state["last_table_edited"] = edited
+    st.session_state["last_table_original"] = df
 
     # Trata alterações de seleção
     page_ids = set(df["id_produto"])
@@ -610,15 +569,38 @@ def _render_export() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Salvar cadastros pendentes
+# Salvar cadastros
 # ---------------------------------------------------------------------------
 
-def _render_save_pending() -> None:
-    pending = st.session_state.pending_edits
-    if not pending:
+def _render_save_button() -> None:
+    edited = st.session_state.get("last_table_edited")
+    original = st.session_state.get("last_table_original")
+    if edited is None or original is None:
         return
 
-    n = len(pending)
+    changes = []
+    for _, erow in edited.iterrows():
+        prod_id = erow["id_produto"]
+        orig_rows = original[original["id_produto"] == prod_id]
+        if orig_rows.empty:
+            continue
+        orig_row = orig_rows.iloc[0]
+        e_cod = str(erow["cod_insumo"]).strip() if pd.notna(erow["cod_insumo"]) else ""
+        e_inf = str(erow["insumo_informado"]).strip() if pd.notna(erow["insumo_informado"]) else ""
+        o_cod = str(orig_row["cod_insumo"]).strip() if pd.notna(orig_row["cod_insumo"]) else ""
+        o_inf = str(orig_row["insumo_informado"]).strip() if pd.notna(orig_row["insumo_informado"]) else ""
+        if (e_cod != o_cod or e_inf != o_inf) and (e_cod or e_inf):
+            changes.append({
+                "cod_informante": str(erow["cod_informante"]),
+                "id_produto": prod_id,
+                "cod_insumo": e_cod,
+                "insumo_informado": e_inf,
+            })
+
+    if not changes:
+        return
+
+    n = len(changes)
     c1, c2, _ = st.columns([3, 2, 7])
     with c1:
         st.info(f"{n} item(ns) com cadastro pendente")
@@ -626,26 +608,24 @@ def _render_save_pending() -> None:
         if st.button("💾 Salvar Cadastros", type="primary", use_container_width=True):
             errors = []
             saved = 0
-            for prod_id, edits in list(pending.items()):
-                cod_insumo = str(edits.get("cod_insumo", "")).strip()
-                insumo_informado = str(edits.get("insumo_informado", "")).strip()
-                if not cod_insumo or not insumo_informado:
-                    errors.append(f"{prod_id}: preencha cod_insumo e insumo_informado")
+            for chg in changes:
+                if not chg["cod_insumo"] or not chg["insumo_informado"]:
+                    errors.append(f"{chg['id_produto']}: preencha cod_insumo e insumo_informado")
                     continue
                 try:
                     save_cadastrado_bp(
-                        edits["cod_informante"],
-                        prod_id,
-                        cod_insumo,
-                        insumo_informado,
+                        chg["cod_informante"],
+                        chg["id_produto"],
+                        chg["cod_insumo"],
+                        chg["insumo_informado"],
                     )
                     saved += 1
                 except Exception as e:
-                    errors.append(f"{prod_id}: {e}")
-
+                    errors.append(f"{chg['id_produto']}: {e}")
             if saved:
                 st.success(f"{saved} registro(s) salvo(s) com sucesso.")
-                st.session_state.pending_edits = {}
+                st.session_state.pop("last_table_edited", None)
+                st.session_state.pop("last_table_original", None)
                 st.session_state.page_cache_key = None
                 st.session_state.table_version += 1
                 st.rerun()
@@ -664,6 +644,9 @@ def _data_page() -> None:
 
     options = _get_filter_options_cached()
     filters = _render_filters(options)
+
+    if st.session_state.filter_cadastrados_bp:
+        filters["cadastrados_bp"] = True
 
     filters_hash = hashlib.md5(str(sorted(filters.items())).encode()).hexdigest()
     if st.session_state.get("last_filters_hash") != filters_hash:
@@ -690,9 +673,9 @@ def _data_page() -> None:
 
     _render_metrics(metrics_placeholder, total)
     _render_export()
-    _render_selection_controls(filters, total)
-    _render_save_pending()
+    _render_cadastrados_bp_toggle()
     _render_table(page_df)
+    _render_save_button()
     _render_pagination(total)
 
 

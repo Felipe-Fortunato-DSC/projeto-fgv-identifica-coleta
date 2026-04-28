@@ -131,8 +131,10 @@ def _build_where(filters: dict) -> str:
         conditions.append(f"cp.tipo_preco = {_escape(filters['tipo_preco'])}")
     if filters.get("uf"):
         conditions.append(f"cp.uf = {_escape(filters['uf'])}")
-    if filters.get("data_apos"):
-        conditions.append(f"cp.data_coleta >= {_escape(str(filters['data_apos']))}")
+    if filters.get("data_exata"):
+        conditions.append(f"cp.data_coleta = DATE {_escape(str(filters['data_exata']))}")
+    if filters.get("cadastrados_bp"):
+        conditions.append("cb.cod_insumo IS NOT NULL")
     if filters.get("ean_sku"):
         term = filters["ean_sku"].strip()
         conditions.append(f"(cp.ean = {_escape(term)} OR cp.sku = {_escape(term)})")
