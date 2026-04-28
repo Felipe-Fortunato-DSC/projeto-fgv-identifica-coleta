@@ -234,17 +234,6 @@ def _render_sidebar_authenticated() -> None:
             st.session_state.login_view = "login"
             st.rerun()
 
-        if user["tipo"] in ("master", "administrador"):
-            st.divider()
-            if st.session_state.current_view == "data":
-                if st.button("⚙️ Gerenciamento", use_container_width=True, key="btn_management"):
-                    st.session_state.current_view = "management"
-                    st.rerun()
-            else:
-                if st.button("🔙 Voltar à Consulta", use_container_width=True, key="btn_back"):
-                    st.session_state.current_view = "data"
-                    st.rerun()
-
         st.markdown(
             """
             <div style="position:fixed; bottom:1rem; font-size:0.72rem; color:#aaa;">
@@ -811,10 +800,7 @@ def main() -> None:
 
     _render_sidebar_authenticated()
 
-    if st.session_state.current_view == "management":
-        _management_page()
-    else:
-        _data_page()
+    _data_page()
 
 
 if __name__ == "__main__":
