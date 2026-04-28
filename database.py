@@ -152,7 +152,7 @@ def _build_where(filters: dict) -> str:
     if filters.get("uf"):
         conditions.append(f"cp.uf = {_escape(filters['uf'])}")
     if filters.get("data_exata"):
-        conditions.append(f"cp.data_coleta = DATE {_escape(str(filters['data_exata']))}")
+        conditions.append(f"cp.data_coleta = {_escape(str(filters['data_exata']))}")
     if filters.get("cod_insumo"):
         conditions.append(f"cb.cod_insumo = {_escape(filters['cod_insumo'])}")
     if filters.get("insumo_informado"):
