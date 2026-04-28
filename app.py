@@ -264,15 +264,7 @@ def _render_filters(options: dict) -> dict:
 
     st.session_state["_filter_options_ref"] = options
 
-    def _on_informante_change():
-        opts = st.session_state.get("_filter_options_ref", {})
-        _sfx = st.session_state.filter_suffix
-        cod = st.session_state.get(f"f_cod_{_sfx}", "")
-        _date_key = f"f_data_{_sfx}"
-        if cod:
-            latest = opts.get("ultima_coleta_by_informante", {}).get(cod)
-            if latest:
-                st.session_state[_date_key] = date.fromisoformat(latest)
+    def _reset_state():
         st.session_state.selected_ids = set()
         st.session_state.pop("last_table_edited", None)
         st.session_state.pop("last_table_original", None)
@@ -281,7 +273,32 @@ def _render_filters(options: dict) -> dict:
         st.session_state.page = 1
         st.session_state.page_cache_key = None
 
+    def _on_cod_change():
+        opts = st.session_state.get("_filter_options_ref", {})
+        _sfx = st.session_state.filter_suffix
+        cod = st.session_state.get(f"f_cod_{_sfx}", "")
+        nome = opts.get("cod_to_nome", {}).get(cod, "")
+        st.session_state[f"f_nome_{_sfx}"] = nome
+        if cod:
+            latest = opts.get("ultima_coleta_by_informante", {}).get(cod)
+            if latest:
+                st.session_state[f"f_data_{_sfx}"] = date.fromisoformat(latest)
+        _reset_state()
+
+    def _on_nome_change():
+        opts = st.session_state.get("_filter_options_ref", {})
+        _sfx = st.session_state.filter_suffix
+        nome = st.session_state.get(f"f_nome_{_sfx}", "")
+        cod = opts.get("nome_to_cod", {}).get(nome, "")
+        st.session_state[f"f_cod_{_sfx}"] = cod
+        if cod:
+            latest = opts.get("ultima_coleta_by_informante", {}).get(cod)
+            if latest:
+                st.session_state[f"f_data_{_sfx}"] = date.fromisoformat(latest)
+        _reset_state()
+
     cod_inf = nome_inf = marca = ean_sku = busca_texto = tipo_preco = uf = ""
+    cod_insumo_f = insumo_informado_f = ""
     data_coleta = None
 
     with st.expander("🔍 Filtros", expanded=False):
@@ -291,12 +308,7 @@ def _render_filters(options: dict) -> dict:
                 st.session_state.filter_suffix += 1
                 st.session_state.page = 1
                 st.session_state.table_version += 1
-                st.session_state.selected_ids = set()
-                st.session_state.pop("last_table_edited", None)
-                st.session_state.pop("last_table_original", None)
-                st.session_state.filter_cadastrados_bp = False
-                st.session_state["toggle_cadastrados_bp"] = False
-                st.session_state.page_cache_key = None
+                _reset_state()
                 st.rerun()
 
         col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
@@ -307,12 +319,17 @@ def _render_filters(options: dict) -> dict:
                 options=[""] + options["cod_informante"],
                 index=0,
                 key=f"f_cod_{sfx}",
-                on_change=_on_informante_change,
+                on_change=_on_cod_change,
             )
             ean_sku = st.text_input(
                 "EAN / SKU",
                 placeholder="Digite o código exato...",
                 key=f"f_ean_{sfx}",
+            )
+            cod_insumo_f = st.selectbox(
+                "Cód. Insumo",
+                options=[""] + options.get("cod_insumo", []),
+                key=f"f_cod_insumo_{sfx}",
             )
 
         with col2:
@@ -320,11 +337,17 @@ def _render_filters(options: dict) -> dict:
                 "Nome Informante",
                 options=[""] + options["nome_informante"],
                 key=f"f_nome_{sfx}",
+                on_change=_on_nome_change,
             )
             busca_texto = st.text_input(
                 "Descrição",
                 placeholder="Ex: sabão pó nestlé...",
                 key=f"f_texto_{sfx}",
+            )
+            insumo_informado_f = st.selectbox(
+                "Insumo Informado",
+                options=[""] + options.get("insumo_informado", []),
+                key=f"f_insumo_inf_{sfx}",
             )
 
         with col3:
@@ -371,6 +394,10 @@ def _render_filters(options: dict) -> dict:
         filters["ean_sku"] = ean_sku.strip()
     if busca_texto.strip():
         filters["busca_texto"] = busca_texto.strip()
+    if cod_insumo_f:
+        filters["cod_insumo"] = cod_insumo_f
+    if insumo_informado_f:
+        filters["insumo_informado"] = insumo_informado_f
     if data_coleta:
         filters["data_exata"] = data_coleta
 

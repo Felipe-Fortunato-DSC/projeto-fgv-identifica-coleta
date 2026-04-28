@@ -83,31 +83,51 @@ def _run_query(sql: str) -> pd.DataFrame:
 
 def get_filter_options() -> dict:
     options: dict = {}
-    for col in ("nome_informante", "marca", "tipo_preco", "uf"):
+    for col in ("marca", "tipo_preco", "uf"):
         df = _run_query(
             f"SELECT DISTINCT {col} FROM {TABLE_COLETA} "
             f"WHERE {col} IS NOT NULL ORDER BY {col}"
         )
         options[col] = df[col].tolist()
 
-    df = _run_query(
+    # Informantes: cod, nome, última coleta — tudo em uma query
+    df_inf = _run_query(
         f"SELECT element_at(cod_informante, 1) AS cod_informante, "
+        f"MAX(nome_informante) AS nome_informante, "
         f"MAX(data_coleta) AS ultima_coleta "
         f"FROM {TABLE_COLETA} WHERE cod_informante IS NOT NULL "
         f"GROUP BY element_at(cod_informante, 1) "
         f"ORDER BY cod_informante"
     )
-    options["cod_informante"] = df["cod_informante"].tolist()
+    options["cod_informante"] = df_inf["cod_informante"].tolist()
+    options["nome_informante"] = sorted(df_inf["nome_informante"].dropna().tolist())
     options["ultima_coleta_by_informante"] = {
         row["cod_informante"]: str(row["ultima_coleta"])
-        for _, row in df.iterrows()
+        for _, row in df_inf.iterrows()
     }
+    options["cod_to_nome"] = {
+        row["cod_informante"]: row["nome_informante"]
+        for _, row in df_inf.iterrows()
+        if pd.notna(row["nome_informante"])
+    }
+    options["nome_to_cod"] = {v: k for k, v in options["cod_to_nome"].items()}
 
     row = _run_query(
         f"SELECT MIN(data_coleta) AS mn, MAX(data_coleta) AS mx FROM {TABLE_COLETA}"
     ).iloc[0]
     options["data_min"] = str(row["mn"])
     options["data_max"] = str(row["mx"])
+
+    # Opções de insumo (tabela pode estar vazia)
+    for col in ("cod_insumo", "insumo_informado"):
+        try:
+            df_bp = _run_query(
+                f"SELECT DISTINCT {col} FROM {TABLE_CADASTRO} "
+                f"WHERE {col} IS NOT NULL ORDER BY {col}"
+            )
+            options[col] = df_bp[col].tolist()
+        except Exception:
+            options[col] = []
 
     return options
 
@@ -133,6 +153,10 @@ def _build_where(filters: dict) -> str:
         conditions.append(f"cp.uf = {_escape(filters['uf'])}")
     if filters.get("data_exata"):
         conditions.append(f"cp.data_coleta = DATE {_escape(str(filters['data_exata']))}")
+    if filters.get("cod_insumo"):
+        conditions.append(f"cb.cod_insumo = {_escape(filters['cod_insumo'])}")
+    if filters.get("insumo_informado"):
+        conditions.append(f"cb.insumo_informado = {_escape(filters['insumo_informado'])}")
     if filters.get("cadastrados_bp"):
         conditions.append("cb.cod_insumo IS NOT NULL")
     if filters.get("ean_sku"):
