@@ -11,8 +11,8 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "data" / "database.db"
 
-_MASTER_NOME = "Master"
-_MASTER_SENHA = "Master290915@"
+_MASTER_NOME = "FGV"
+_MASTER_SENHA = "FGV2026"
 
 
 # ---------------------------------------------------------------------------
@@ -73,14 +73,18 @@ def init_auth() -> None:
             conn.execute("ALTER TABLE usuarios ADD COLUMN area TEXT")
         except Exception:
             pass
-        if not conn.execute(
-            "SELECT 1 FROM usuarios WHERE tipo='master'"
-        ).fetchone():
-            h, s = _hash_password(_MASTER_SENHA)
+        h, s = _hash_password(_MASTER_SENHA)
+        master = conn.execute("SELECT id FROM usuarios WHERE tipo='master'").fetchone()
+        if not master:
             conn.execute(
                 "INSERT INTO usuarios (nome, email, senha_hash, salt, tipo) "
                 "VALUES (?,?,?,?,?)",
                 (_MASTER_NOME, None, h, s, "master"),
+            )
+        else:
+            conn.execute(
+                "UPDATE usuarios SET nome=?, senha_hash=?, salt=? WHERE tipo='master'",
+                (_MASTER_NOME, h, s),
             )
         conn.commit()
 
