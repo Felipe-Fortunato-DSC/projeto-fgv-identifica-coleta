@@ -12,7 +12,7 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent / "data" / "database.db"
 
 _MASTER_NOME = "FGV"
-_MASTER_SENHA = "FGV2026"
+_MASTER_SENHA = "FGV2026@"
 
 
 # ---------------------------------------------------------------------------
