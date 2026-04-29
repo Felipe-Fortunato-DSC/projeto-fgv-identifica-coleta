@@ -5,6 +5,7 @@ Cod_insumo e insumo_informado são buscados via LEFT JOIN em tbl_cadastrados_bp.
 
 import os
 from contextlib import contextmanager
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -13,8 +14,9 @@ from pyathena import connect
 
 load_dotenv(Path(__file__).parent / ".env")
 
-TABLE_COLETA   = "db_scraping_spdo.tbl_ecommerce_spdo"
-TABLE_CADASTRO = "db_scraping_spdo.tbl_cadastrados_bp"
+TABLE_COLETA        = "db_scraping_spdo.tbl_ecommerce_spdo"
+TABLE_CADASTRO      = "db_scraping_spdo.tbl_cadastrados_bp"
+TABLE_MONITORAMENTO = "db_scraping_spdo.tbl_monitoramento"
 
 VISIBLE_COLUMNS = [
     "data_coleta", "plataforma", "cod_informante", "nome_informante",
@@ -118,16 +120,34 @@ def get_filter_options() -> dict:
     options["data_min"] = str(row["mn"])
     options["data_max"] = str(row["mx"])
 
-    # Opções de insumo (tabela pode estar vazia)
-    for col in ("cod_insumo", "insumo_informado"):
-        try:
-            df_bp = _run_query(
-                f"SELECT DISTINCT {col} FROM {TABLE_CADASTRO} "
-                f"WHERE {col} IS NOT NULL ORDER BY {col}"
-            )
-            options[col] = df_bp[col].tolist()
-        except Exception:
-            options[col] = []
+    # Opções de insumo — globais e por informante
+    try:
+        df_bp = _run_query(
+            f"SELECT DISTINCT CAST(cod_informante AS VARCHAR) AS cod_informante, "
+            f"cod_insumo, insumo_informado "
+            f"FROM {TABLE_CADASTRO} "
+            f"WHERE cod_insumo IS NOT NULL OR insumo_informado IS NOT NULL"
+        )
+        options["cod_insumo"] = sorted(df_bp["cod_insumo"].dropna().unique().tolist())
+        options["insumo_informado"] = sorted(df_bp["insumo_informado"].dropna().unique().tolist())
+
+        cod_insumo_by_inf: dict = {}
+        insumo_inf_by_inf: dict = {}
+        for _, row in df_bp.iterrows():
+            cod = str(row["cod_informante"]) if pd.notna(row["cod_informante"]) else None
+            if not cod:
+                continue
+            if pd.notna(row["cod_insumo"]):
+                cod_insumo_by_inf.setdefault(cod, set()).add(row["cod_insumo"])
+            if pd.notna(row["insumo_informado"]):
+                insumo_inf_by_inf.setdefault(cod, set()).add(row["insumo_informado"])
+        options["cod_insumo_by_informante"] = {k: sorted(v) for k, v in cod_insumo_by_inf.items()}
+        options["insumo_informado_by_informante"] = {k: sorted(v) for k, v in insumo_inf_by_inf.items()}
+    except Exception:
+        options["cod_insumo"] = []
+        options["insumo_informado"] = []
+        options["cod_insumo_by_informante"] = {}
+        options["insumo_informado_by_informante"] = {}
 
     return options
 
@@ -152,7 +172,15 @@ def _build_where(filters: dict) -> str:
     if filters.get("uf"):
         conditions.append(f"cp.uf = {_escape(filters['uf'])}")
     if filters.get("data_exata"):
-        conditions.append(f"cp.data_coleta = {_escape(str(filters['data_exata']))}")
+        conditions.append(
+            f"TRY_CAST(cp.data_coleta AS DATE) = DATE '{str(filters['data_exata'])}'"
+        )
+    else:
+        cutoff = (date.today() - timedelta(days=30)).isoformat()
+        today  = date.today().isoformat()
+        conditions.append(
+            f"TRY_CAST(cp.data_coleta AS DATE) BETWEEN DATE '{cutoff}' AND DATE '{today}'"
+        )
     if filters.get("cod_insumo"):
         conditions.append(f"cb.cod_insumo = {_escape(filters['cod_insumo'])}")
     if filters.get("insumo_informado"):
@@ -237,3 +265,49 @@ def save_cadastrado_bp(
     with get_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(sql)
+
+
+def get_monitoramento_data() -> pd.DataFrame:
+    """Retorna tbl_monitoramento enriquecida com status, tipo_preco e ultima_coleta do tbl_ecommerce."""
+    sql = f"""
+        SELECT
+            CAST(m.cod_informante AS VARCHAR) AS cod_informante,
+            m.dominio,
+            m.frete,
+            CASE WHEN e.cod_informante IS NOT NULL THEN 'Ativo' ELSE 'Inativo' END AS status,
+            e.tipo_preco,
+            e.ultima_coleta
+        FROM {TABLE_MONITORAMENTO} m
+        LEFT JOIN (
+            SELECT
+                element_at(cod_informante, 1)       AS cod_informante,
+                MAX(tipo_preco)                      AS tipo_preco,
+                CAST(MAX(data_coleta) AS VARCHAR)    AS ultima_coleta
+            FROM {TABLE_COLETA}
+            GROUP BY element_at(cod_informante, 1)
+        ) e ON CAST(m.cod_informante AS VARCHAR) = e.cod_informante
+        ORDER BY CAST(m.cod_informante AS VARCHAR)
+    """
+    try:
+        return _run_query(sql)
+    except Exception:
+        return pd.DataFrame(columns=["cod_informante", "dominio", "frete", "status", "tipo_preco", "ultima_coleta"])
+
+
+def get_carga_data() -> pd.DataFrame:
+    """Retorna todos os insumos cadastrados BP com cod_insumo e insumo_informado preenchidos."""
+    sql = f"""
+        SELECT
+            CAST(cod_informante AS VARCHAR) AS cod_informante,
+            cod_insumo,
+            insumo_informado,
+            id_produto_site
+        FROM {TABLE_CADASTRO}
+        WHERE cod_insumo IS NOT NULL
+          AND insumo_informado IS NOT NULL
+        ORDER BY CAST(cod_informante AS VARCHAR), cod_insumo
+    """
+    try:
+        return _run_query(sql)
+    except Exception:
+        return pd.DataFrame(columns=["cod_informante", "cod_insumo", "insumo_informado", "id_produto_site"])

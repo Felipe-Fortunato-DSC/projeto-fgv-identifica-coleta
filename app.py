@@ -25,8 +25,10 @@ from auth import (
 )
 from database import (
     get_all_filtered_ids,
+    get_carga_data,
     get_data_by_ids,
     get_filter_options,
+    get_monitoramento_data,
     get_page_data_with_count,
     save_cadastrado_bp,
 )
@@ -268,6 +270,8 @@ def _render_filters(options: dict) -> dict:
         cod = st.session_state.get(f"f_cod_{_sfx}", "")
         nome = opts.get("cod_to_nome", {}).get(cod, "")
         st.session_state[f"f_nome_{_sfx}"] = nome
+        st.session_state[f"f_cod_insumo_{_sfx}"] = ""
+        st.session_state[f"f_insumo_inf_{_sfx}"] = ""
         if cod:
             latest = opts.get("ultima_coleta_by_informante", {}).get(cod)
             if latest:
@@ -280,6 +284,8 @@ def _render_filters(options: dict) -> dict:
         nome = st.session_state.get(f"f_nome_{_sfx}", "")
         cod = opts.get("nome_to_cod", {}).get(nome, "")
         st.session_state[f"f_cod_{_sfx}"] = cod
+        st.session_state[f"f_cod_insumo_{_sfx}"] = ""
+        st.session_state[f"f_insumo_inf_{_sfx}"] = ""
         if cod:
             latest = opts.get("ultima_coleta_by_informante", {}).get(cod)
             if latest:
@@ -315,9 +321,13 @@ def _render_filters(options: dict) -> dict:
                 placeholder="Digite o código exato...",
                 key=f"f_ean_{sfx}",
             )
+            _cod_insumo_opts = (
+                options.get("cod_insumo_by_informante", {}).get(cod_inf, options.get("cod_insumo", []))
+                if cod_inf else options.get("cod_insumo", [])
+            )
             cod_insumo_f = st.selectbox(
                 "Cód. Insumo",
-                options=[""] + options.get("cod_insumo", []),
+                options=[""] + _cod_insumo_opts,
                 key=f"f_cod_insumo_{sfx}",
             )
 
@@ -333,9 +343,13 @@ def _render_filters(options: dict) -> dict:
                 placeholder="Ex: sabão pó nestlé...",
                 key=f"f_texto_{sfx}",
             )
+            _insumo_inf_opts = (
+                options.get("insumo_informado_by_informante", {}).get(cod_inf, options.get("insumo_informado", []))
+                if cod_inf else options.get("insumo_informado", [])
+            )
             insumo_informado_f = st.selectbox(
                 "Insumo Informado",
-                options=[""] + options.get("insumo_informado", []),
+                options=[""] + _insumo_inf_opts,
                 key=f"f_insumo_inf_{sfx}",
             )
 
@@ -359,9 +373,10 @@ def _render_filters(options: dict) -> dict:
             )
             data_min = date.fromisoformat(options["data_min"])
             data_max = date.fromisoformat(options["data_max"])
+            _default_date = max(data_min, min(date.today(), data_max))
             data_coleta = st.date_input(
                 "Data da Coleta",
-                value=None,
+                value=_default_date,
                 min_value=data_min,
                 max_value=data_max,
                 format="DD/MM/YYYY",
@@ -409,9 +424,7 @@ def _render_banner() -> None:
     )
 
 
-def _render_metrics(placeholder, total: int) -> None:
-    n_sel = len(st.session_state.selected_ids)
-
+def _render_metrics(placeholder, total: int, n_insumos: int) -> None:
     def _val(n):
         color = "#ffffff" if n > 0 else "#888888"
         return f"<span style='color:{color};'>{str(n).replace(',', '.')}</span>"
@@ -424,7 +437,7 @@ def _render_metrics(placeholder, total: int) -> None:
                     <strong>Produtos Coletados:</strong> {_val(total)}
                 </span>
                 <span style="font-size:1.05rem; color:#ffffff;">
-                    <strong>Produtos Selecionados:</strong> {_val(n_sel)}
+                    <strong>Insumos Cadastrados:</strong> {_val(n_insumos)}
                 </span>
             </div>
             """,
@@ -654,8 +667,6 @@ def _render_save_button() -> None:
 # ---------------------------------------------------------------------------
 
 def _data_page() -> None:
-    _render_banner()
-
     metrics_placeholder = st.empty()
 
     options = _get_filter_options_cached()
@@ -687,7 +698,12 @@ def _data_page() -> None:
             st.error(f"Erro ao consultar Athena: {e}")
             return
 
-    _render_metrics(metrics_placeholder, total)
+    cod_inf = filters.get("cod_informante", "")
+    if cod_inf:
+        n_insumos = len(options.get("cod_insumo_by_informante", {}).get(cod_inf, []))
+    else:
+        n_insumos = len(options.get("cod_insumo", []))
+    _render_metrics(metrics_placeholder, total, n_insumos)
     _render_export()
     _render_cadastrados_bp_toggle()
     _render_table(page_df)
@@ -777,6 +793,137 @@ def _management_page() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Aba Monitoramento
+# ---------------------------------------------------------------------------
+
+def _monitoramento_page() -> None:
+    st.markdown("#### Monitoramento de Informantes")
+    metrics_placeholder = st.empty()
+
+    try:
+        with st.spinner("Carregando monitoramento..."):
+            df = get_monitoramento_data()
+    except Exception as e:
+        st.error(f"Erro ao consultar Athena: {e}")
+        return
+
+    if df.empty:
+        st.info("Nenhum informante cadastrado na tabela de monitoramento.")
+        return
+
+    today = pd.Timestamp.today().normalize()
+    parsed_dates = pd.to_datetime(df["ultima_coleta"], errors="coerce").dt.normalize()
+    ativos_mask = df["status"] == "Ativo"
+    df["execucao"] = ""
+    df.loc[ativos_mask & (parsed_dates == today), "execucao"] = "Sucesso"
+    df.loc[ativos_mask & (parsed_dates < today), "execucao"] = "Atraso"
+
+    sfx = st.session_state.get("mon_filter_suffix", 0)
+
+    with st.expander("🔍 Filtros", expanded=False):
+        th1, th2 = st.columns([9, 1])
+        with th2:
+            if st.button("Limpar Filtro", key=f"mon_limpar_{sfx}", use_container_width=True):
+                st.session_state.mon_filter_suffix = sfx + 1
+                st.rerun()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            cod_options = sorted(df["cod_informante"].dropna().unique().tolist())
+            cod_inf = st.selectbox(
+                "Cód. Informante",
+                options=[""] + cod_options,
+                key=f"mon_f_cod_{sfx}",
+            )
+        with col2:
+            frete_options = sorted(df["frete"].dropna().unique().tolist())
+            frete = st.selectbox(
+                "Frete",
+                options=[""] + frete_options,
+                key=f"mon_f_frete_{sfx}",
+            )
+
+    filtered = df
+    if cod_inf:
+        filtered = filtered[filtered["cod_informante"] == cod_inf]
+    if frete:
+        filtered = filtered[filtered["frete"] == frete]
+    if st.session_state.get("mon_only_ativos", False):
+        filtered = filtered[filtered["status"] == "Ativo"]
+
+    total = len(df)
+    ativos = int((df["status"] == "Ativo").sum())
+    inativos = int((df["status"] == "Inativo").sum())
+
+    def _val(n: int) -> str:
+        color = "#ffffff" if n > 0 else "#888888"
+        return f"<span style='color:{color};'>{str(n).replace(',', '.')}</span>"
+
+    with metrics_placeholder:
+        st.markdown(
+            f"""
+            <div style="display:flex; gap:2.5rem; margin:0.4rem 0 0.6rem 0; flex-wrap:wrap;">
+                <span style="font-size:1.05rem; color:#ffffff;">
+                    <strong>Qtd. de Informantes:</strong> {_val(total)}
+                </span>
+                <span style="font-size:1.05rem; color:#ffffff;">
+                    <strong>Informantes Ativos:</strong> {_val(ativos)}
+                </span>
+                <span style="font-size:1.05rem; color:#ffffff;">
+                    <strong>Informantes Inativos:</strong> {_val(inativos)}
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.toggle(
+        "Informantes Ativos",
+        key="mon_only_ativos",
+        help="Filtrar apenas informantes com status Ativo",
+    )
+
+    col_cfg = {
+        "cod_informante": st.column_config.TextColumn("Cód. Informante"),
+        "dominio":        st.column_config.TextColumn("Domínio"),
+        "frete":          st.column_config.TextColumn("Frete"),
+        "status":         st.column_config.TextColumn("Status"),
+        "tipo_preco":     st.column_config.TextColumn("Tipo de Preço"),
+        "ultima_coleta":  st.column_config.TextColumn("Última Coleta"),
+        "execucao":       st.column_config.TextColumn("Execução"),
+    }
+    st.dataframe(filtered, use_container_width=True, column_config=col_cfg, hide_index=True)
+    st.caption(f"{len(filtered)} informante(s) listado(s)")
+
+
+# ---------------------------------------------------------------------------
+# Aba Carga
+# ---------------------------------------------------------------------------
+
+def _carga_page() -> None:
+    st.markdown("#### Insumos Cadastrados BP")
+    try:
+        with st.spinner("Carregando insumos cadastrados..."):
+            df = get_carga_data()
+    except Exception as e:
+        st.error(f"Erro ao consultar Athena: {e}")
+        return
+
+    if df.empty:
+        st.info("Nenhum insumo cadastrado com código e descrição preenchidos.")
+        return
+
+    col_cfg = {
+        "cod_informante":  st.column_config.TextColumn("Cód. Informante"),
+        "cod_insumo":      st.column_config.TextColumn("Cód. Insumo"),
+        "insumo_informado": st.column_config.TextColumn("Insumo Informado"),
+        "id_produto_site": st.column_config.TextColumn("ID Produto Site"),
+    }
+    st.dataframe(df, use_container_width=True, column_config=col_cfg, hide_index=True)
+    st.caption(f"{len(df)} insumo(s) cadastrado(s)")
+
+
+# ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
 
@@ -799,8 +946,15 @@ def main() -> None:
         return
 
     _render_sidebar_authenticated()
+    _render_banner()
 
-    _data_page()
+    tab1, tab2, tab3 = st.tabs(["Consulta de Preços", "Monitoramento", "Carga"])
+    with tab1:
+        _data_page()
+    with tab2:
+        _monitoramento_page()
+    with tab3:
+        _carga_page()
 
 
 if __name__ == "__main__":
