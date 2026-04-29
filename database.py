@@ -18,6 +18,12 @@ TABLE_COLETA        = "db_scraping_spdo.tbl_ecommerce_spdo"
 TABLE_CADASTRO      = "db_scraping_spdo.tbl_cadastrados_bp"
 TABLE_MONITORAMENTO = "db_scraping_spdo.tbl_monitoramento"
 
+# Janela utilizada para alimentar opções de filtro (evita full-scan histórico).
+OPTIONS_LOOKBACK_DAYS = 365
+# Reuso de resultado de query do Athena — corta custo/latência em consultas
+# repetitivas. O workgroup precisa permitir reuso.
+RESULT_REUSE_MINUTES = 60
+
 VISIBLE_COLUMNS = [
     "data_coleta", "plataforma", "cod_informante", "nome_informante",
     "periodicidade", "tipo_preco", "cod_insumo", "ean", "sku",
@@ -71,10 +77,20 @@ def _escape(val: str) -> str:
     return "'" + str(val).replace("'", "''") + "'"
 
 
-def _run_query(sql: str) -> pd.DataFrame:
+def _run_query(sql: str, reuse: bool = True) -> pd.DataFrame:
     with get_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute(sql)
+        try:
+            if reuse:
+                cursor.execute(
+                    sql,
+                    result_reuse_enable=True,
+                    result_reuse_minutes=RESULT_REUSE_MINUTES,
+                )
+            else:
+                cursor.execute(sql)
+        except TypeError:
+            cursor.execute(sql)
         cols = [d[0] for d in cursor.description]
         return pd.DataFrame(cursor.fetchall(), columns=cols)
 
@@ -85,64 +101,76 @@ def _run_query(sql: str) -> pd.DataFrame:
 
 def get_filter_options() -> dict:
     options: dict = {}
-    for col in ("marca", "tipo_preco", "uf"):
-        df = _run_query(
-            f"SELECT DISTINCT {col} FROM {TABLE_COLETA} "
-            f"WHERE {col} IS NOT NULL ORDER BY {col}"
-        )
-        options[col] = df[col].tolist()
+    cutoff = (date.today() - timedelta(days=OPTIONS_LOOKBACK_DAYS)).isoformat()
 
-    # Informantes: cod, nome, última coleta — tudo em uma query
-    df_inf = _run_query(
-        f"SELECT element_at(cod_informante, 1) AS cod_informante, "
-        f"MAX(nome_informante) AS nome_informante, "
-        f"MAX(data_coleta) AS ultima_coleta "
-        f"FROM {TABLE_COLETA} WHERE cod_informante IS NOT NULL "
-        f"GROUP BY element_at(cod_informante, 1) "
-        f"ORDER BY cod_informante"
-    )
+    # Marca, tipo_preco e UF em uma única query (unpivot via UNION ALL).
+    # Dispara um único job Athena em vez de três.
+    df_distinct = _run_query(f"""
+        SELECT 'marca' AS col, marca AS value FROM {TABLE_COLETA}
+            WHERE TRY_CAST(data_coleta AS DATE) >= DATE '{cutoff}' AND marca IS NOT NULL
+        UNION
+        SELECT 'tipo_preco' AS col, tipo_preco AS value FROM {TABLE_COLETA}
+            WHERE TRY_CAST(data_coleta AS DATE) >= DATE '{cutoff}' AND tipo_preco IS NOT NULL
+        UNION
+        SELECT 'uf' AS col, uf AS value FROM {TABLE_COLETA}
+            WHERE TRY_CAST(data_coleta AS DATE) >= DATE '{cutoff}' AND uf IS NOT NULL
+    """)
+    for col in ("marca", "tipo_preco", "uf"):
+        options[col] = sorted(df_distinct.loc[df_distinct["col"] == col, "value"].dropna().tolist())
+
+    # Informantes: cod, nome, última coleta — restrito à janela.
+    df_inf = _run_query(f"""
+        SELECT element_at(cod_informante, 1) AS cod_informante,
+               MAX(nome_informante) AS nome_informante,
+               MAX(data_coleta) AS ultima_coleta
+        FROM {TABLE_COLETA}
+        WHERE cod_informante IS NOT NULL
+          AND TRY_CAST(data_coleta AS DATE) >= DATE '{cutoff}'
+        GROUP BY element_at(cod_informante, 1)
+        ORDER BY 1
+    """)
     options["cod_informante"] = df_inf["cod_informante"].tolist()
     options["nome_informante"] = sorted(df_inf["nome_informante"].dropna().tolist())
-    options["ultima_coleta_by_informante"] = {
-        row["cod_informante"]: str(row["ultima_coleta"])
-        for _, row in df_inf.iterrows()
-    }
-    options["cod_to_nome"] = {
-        row["cod_informante"]: row["nome_informante"]
-        for _, row in df_inf.iterrows()
-        if pd.notna(row["nome_informante"])
-    }
+    options["ultima_coleta_by_informante"] = dict(
+        zip(df_inf["cod_informante"], df_inf["ultima_coleta"].astype(str))
+    )
+    nome_mask = df_inf["nome_informante"].notna()
+    options["cod_to_nome"] = dict(zip(
+        df_inf.loc[nome_mask, "cod_informante"],
+        df_inf.loc[nome_mask, "nome_informante"],
+    ))
     options["nome_to_cod"] = {v: k for k, v in options["cod_to_nome"].items()}
 
-    row = _run_query(
-        f"SELECT MIN(data_coleta) AS mn, MAX(data_coleta) AS mx FROM {TABLE_COLETA}"
-    ).iloc[0]
-    options["data_min"] = str(row["mn"])
-    options["data_max"] = str(row["mx"])
+    # Janela exposta no widget de data (sem MIN/MAX scan).
+    options["data_min"] = cutoff
+    options["data_max"] = date.today().isoformat()
 
-    # Opções de insumo — globais e por informante
+    # Opções de insumo — globais e por informante.
     try:
-        df_bp = _run_query(
-            f"SELECT DISTINCT CAST(cod_informante AS VARCHAR) AS cod_informante, "
-            f"cod_insumo, insumo_informado "
-            f"FROM {TABLE_CADASTRO} "
-            f"WHERE cod_insumo IS NOT NULL OR insumo_informado IS NOT NULL"
-        )
+        df_bp = _run_query(f"""
+            SELECT DISTINCT CAST(cod_informante AS VARCHAR) AS cod_informante,
+                   cod_insumo, insumo_informado
+            FROM {TABLE_CADASTRO}
+            WHERE cod_insumo IS NOT NULL OR insumo_informado IS NOT NULL
+        """)
         options["cod_insumo"] = sorted(df_bp["cod_insumo"].dropna().unique().tolist())
         options["insumo_informado"] = sorted(df_bp["insumo_informado"].dropna().unique().tolist())
 
-        cod_insumo_by_inf: dict = {}
-        insumo_inf_by_inf: dict = {}
-        for _, row in df_bp.iterrows():
-            cod = str(row["cod_informante"]) if pd.notna(row["cod_informante"]) else None
-            if not cod:
-                continue
-            if pd.notna(row["cod_insumo"]):
-                cod_insumo_by_inf.setdefault(cod, set()).add(row["cod_insumo"])
-            if pd.notna(row["insumo_informado"]):
-                insumo_inf_by_inf.setdefault(cod, set()).add(row["insumo_informado"])
-        options["cod_insumo_by_informante"] = {k: sorted(v) for k, v in cod_insumo_by_inf.items()}
-        options["insumo_informado_by_informante"] = {k: sorted(v) for k, v in insumo_inf_by_inf.items()}
+        # Agrupamento vetorizado em vez de iterrows.
+        cod_grp = (
+            df_bp.dropna(subset=["cod_informante", "cod_insumo"])
+                 .groupby("cod_informante")["cod_insumo"]
+                 .apply(lambda s: sorted(s.unique()))
+                 .to_dict()
+        )
+        ins_grp = (
+            df_bp.dropna(subset=["cod_informante", "insumo_informado"])
+                 .groupby("cod_informante")["insumo_informado"]
+                 .apply(lambda s: sorted(s.unique()))
+                 .to_dict()
+        )
+        options["cod_insumo_by_informante"] = cod_grp
+        options["insumo_informado_by_informante"] = ins_grp
     except Exception:
         options["cod_insumo"] = []
         options["insumo_informado"] = []
@@ -232,12 +260,6 @@ def get_page_data_with_count(
     return df, total
 
 
-def get_all_filtered_ids(filters: dict) -> list[str]:
-    sql = _build_query(filters)
-    df = _run_query(f"SELECT cp.id_produto FROM ({sql}) t")
-    return df["id_produto"].tolist()
-
-
 def get_data_by_ids(ids: list[str]) -> pd.DataFrame:
     if not ids:
         return pd.DataFrame(columns=VISIBLE_COLUMNS)
@@ -269,6 +291,7 @@ def save_cadastrado_bp(
 
 def get_monitoramento_data() -> pd.DataFrame:
     """Retorna tbl_monitoramento enriquecida com status, tipo_preco e ultima_coleta do tbl_ecommerce."""
+    cutoff = (date.today() - timedelta(days=OPTIONS_LOOKBACK_DAYS)).isoformat()
     sql = f"""
         SELECT
             CAST(m.cod_informante AS VARCHAR) AS cod_informante,
@@ -284,6 +307,7 @@ def get_monitoramento_data() -> pd.DataFrame:
                 MAX(tipo_preco)                      AS tipo_preco,
                 CAST(MAX(data_coleta) AS VARCHAR)    AS ultima_coleta
             FROM {TABLE_COLETA}
+            WHERE TRY_CAST(data_coleta AS DATE) >= DATE '{cutoff}'
             GROUP BY element_at(cod_informante, 1)
         ) e ON CAST(m.cod_informante AS VARCHAR) = e.cod_informante
         ORDER BY CAST(m.cod_informante AS VARCHAR)

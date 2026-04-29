@@ -15,16 +15,8 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from auth import (
-    change_password,
-    create_user,
-    get_all_users,
-    init_auth,
-    remove_user,
-    verify_login,
-)
+from auth import USER_NAME, verify_login
 from database import (
-    get_all_filtered_ids,
     get_carga_data,
     get_data_by_ids,
     get_filter_options,
@@ -43,9 +35,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# Inicializa tabela de usuários e garante o Master
-init_auth()
 
 # ---------------------------------------------------------------------------
 # CSS customizado
@@ -91,12 +80,6 @@ st.markdown(
 PAGE_SIZE = 30
 
 
-_TIPO_LABEL = {
-    "master": "Master",
-    "administrador": "Administrador",
-    "tecnico": "Técnico",
-}
-
 # ---------------------------------------------------------------------------
 # Session state
 # ---------------------------------------------------------------------------
@@ -104,14 +87,11 @@ _TIPO_LABEL = {
 def _init_state() -> None:
     defaults = {
         "user": None,
-        "login_view": "login",   # "login" | "change_password"
-        "current_view": "data",  # "data"  | "management"
         "selected_ids": set(),
         "filter_cadastrados_bp": False,
         "page": 1,
         "table_version": 0,
         "filter_suffix": 0,
-        "filters_open": False,
         "page_cache_key": None,
         "page_cache_df": None,
         "page_cache_total": 0,
@@ -144,71 +124,19 @@ def _login_page() -> None:
             unsafe_allow_html=True,
         )
 
-        if st.session_state.login_view == "login":
-            _render_login_form()
-        else:
-            _render_change_password_form()
+        with st.form("login_form"):
+            st.subheader("Acesso ao Sistema")
+            nome = st.text_input("Usuário", value=USER_NAME)
+            senha = st.text_input("Senha", type="password", placeholder="Senha")
+            entrar = st.form_submit_button("Entrar", use_container_width=True, type="primary")
 
-
-def _render_login_form() -> None:
-    nomes = [u["nome"] for u in get_all_users()]
-    with st.form("login_form"):
-        st.subheader("Acesso ao Sistema")
-        nome = st.selectbox("Usuário", options=nomes)
-        senha = st.text_input("Senha", type="password", placeholder="Senha")
-        entrar = st.form_submit_button("Entrar", use_container_width=True, type="primary")
-
-        if entrar:
-            if not senha:
-                st.error("Preencha a senha.")
-            else:
-                user = verify_login(nome, senha)
+            if entrar:
+                user = verify_login(nome.strip(), senha)
                 if user:
                     st.session_state.user = user
-                    st.session_state.login_view = "login"
                     st.rerun()
                 else:
                     st.error("Usuário ou senha incorretos.")
-
-    st.divider()
-    if st.button("🔑 Alterar Senha", use_container_width=True):
-        st.session_state.login_view = "change_password"
-        st.rerun()
-
-
-def _render_change_password_form() -> None:
-    nomes = [u["nome"] for u in get_all_users()]
-    with st.form("change_password_form"):
-        st.subheader("Alterar Senha")
-        nome = st.selectbox("Usuário", options=nomes)
-        senha_atual = st.text_input("Senha atual", type="password")
-        nova_senha = st.text_input("Nova senha", type="password")
-        confirmar = st.text_input("Confirmar nova senha", type="password")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            submitted = st.form_submit_button(
-                "Alterar Senha", use_container_width=True, type="primary"
-            )
-        with c2:
-            voltar = st.form_submit_button("← Voltar", use_container_width=True)
-
-        if voltar:
-            st.session_state.login_view = "login"
-            st.rerun()
-
-        if submitted:
-            if not all([nome, senha_atual, nova_senha, confirmar]):
-                st.error("Preencha todos os campos.")
-            elif nova_senha != confirmar:
-                st.error("A nova senha e a confirmação não coincidem.")
-            else:
-                ok, msg = change_password(nome, senha_atual, nova_senha)
-                if ok:
-                    st.success(msg + " Faça login com a nova senha.")
-                    st.session_state.login_view = "login"
-                else:
-                    st.error(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +145,6 @@ def _render_change_password_form() -> None:
 
 def _render_sidebar_authenticated() -> None:
     user = st.session_state.user
-    tipo_label = _TIPO_LABEL.get(user["tipo"], user["tipo"].capitalize())
 
     with st.sidebar:
         logo_path = Path(__file__).parent / "fgv_ibre.png"
@@ -226,14 +153,11 @@ def _render_sidebar_authenticated() -> None:
             with logo_col:
                 st.image(str(logo_path), use_container_width=True)
         st.markdown(f"### Bem-vindo, {user['nome']}!")
-        st.caption(f"Perfil: {tipo_label}")
         st.divider()
 
         if st.button("🚪 Sair", use_container_width=True):
             for key in ("user", "selected_ids", "page", "table_version", "filter_suffix"):
-                del st.session_state[key]
-            st.session_state.current_view = "data"
-            st.session_state.login_view = "login"
+                st.session_state.pop(key, None)
             st.rerun()
 
         st.markdown(
@@ -657,6 +581,8 @@ def _render_save_button() -> None:
                 st.session_state.pop("last_table_original", None)
                 st.session_state.page_cache_key = None
                 st.session_state.table_version += 1
+                _get_filter_options_cached.clear()
+                _get_carga_cached.clear()
                 st.rerun()
             for err in errors:
                 st.error(err)
@@ -712,87 +638,6 @@ def _data_page() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Página de Gerenciamento de Usuários
-# ---------------------------------------------------------------------------
-
-def _management_page() -> None:
-    st.markdown(
-        """
-        <div class="main-header">
-            <h1>⚙️ Gerenciamento</h1>
-            <p>Adicione, visualize e remova usuários do sistema</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # --- Lista de usuários ---
-    st.subheader("Usuários Cadastrados")
-    users = get_all_users()
-
-    h1, h2, h3, h4, h5 = st.columns([3, 3, 2, 2, 1])
-    h1.markdown("**Nome**")
-    h2.markdown("**Email**")
-    h3.markdown("**Tipo**")
-    h4.markdown("**Área**")
-    h5.markdown("**Ação**")
-    st.divider()
-
-    for u in users:
-        is_master = u["tipo"] == "master"
-        c1, c2, c3, c4, c5 = st.columns([3, 3, 2, 2, 1])
-
-        if is_master:
-            nome_html = f"<span style='color:#999;font-style:italic'>{u['nome']}</span>"
-            tipo_html = f"<span style='color:#999;font-style:italic'>{_TIPO_LABEL.get(u['tipo'])}</span>"
-            c1.markdown(nome_html, unsafe_allow_html=True)
-            c2.markdown("<span style='color:#bbb'>—</span>", unsafe_allow_html=True)
-            c3.markdown(tipo_html, unsafe_allow_html=True)
-            c4.markdown("<span style='color:#bbb'>—</span>", unsafe_allow_html=True)
-            c5.markdown("<span style='color:#ccc' title='Não pode ser removido'>🔒</span>", unsafe_allow_html=True)
-        else:
-            c1.write(u["nome"])
-            c2.write(u["email"] or "—")
-            c3.write(_TIPO_LABEL.get(u["tipo"], u["tipo"]))
-            c4.write(u.get("area") or "—")
-            if c5.button("🗑️", key=f"del_{u['id']}", help=f"Remover {u['nome']}"):
-                ok, msg = remove_user(u["id"])
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-    st.divider()
-
-    # --- Formulário de adição ---
-    st.subheader("Adicionar Usuário")
-    with st.form("add_user_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            novo_nome = st.text_input("Nome do usuário *")
-            novo_email = st.text_input("Email do usuário *")
-            nova_area = st.text_input("Área")
-        with col2:
-            nova_senha = st.text_input("Senha *", type="password")
-            novo_tipo = st.selectbox(
-                "Tipo de usuário *",
-                options=["tecnico", "administrador"],
-                format_func=lambda x: "Técnico" if x == "tecnico" else "Administrador",
-            )
-
-        st.caption("* Campos obrigatórios. Email é obrigatório para Administrador e Técnico.")
-
-        if st.form_submit_button("➕ Adicionar Usuário", type="primary"):
-            ok, msg = create_user(novo_nome, novo_email, nova_senha, novo_tipo, nova_area)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-
-
-# ---------------------------------------------------------------------------
 # Aba Monitoramento
 # ---------------------------------------------------------------------------
 
@@ -802,7 +647,7 @@ def _monitoramento_page() -> None:
 
     try:
         with st.spinner("Carregando monitoramento..."):
-            df = get_monitoramento_data()
+            df = _get_monitoramento_cached()
     except Exception as e:
         st.error(f"Erro ao consultar Athena: {e}")
         return
@@ -810,6 +655,8 @@ def _monitoramento_page() -> None:
     if df.empty:
         st.info("Nenhum informante cadastrado na tabela de monitoramento.")
         return
+
+    df = df.copy()
 
     today = pd.Timestamp.today().normalize()
     parsed_dates = pd.to_datetime(df["ultima_coleta"], errors="coerce").dt.normalize()
@@ -904,7 +751,7 @@ def _carga_page() -> None:
     st.markdown("#### Insumos Cadastrados BP")
     try:
         with st.spinner("Carregando insumos cadastrados..."):
-            df = get_carga_data()
+            df = _get_carga_cached()
     except Exception as e:
         st.error(f"Erro ao consultar Athena: {e}")
         return
@@ -932,6 +779,14 @@ def _get_filter_options_cached() -> dict:
     return get_filter_options()
 
 
+@st.cache_data(ttl=300)
+def _get_monitoramento_cached() -> pd.DataFrame:
+    return get_monitoramento_data()
+
+
+@st.cache_data(ttl=300)
+def _get_carga_cached() -> pd.DataFrame:
+    return get_carga_data()
 
 
 # ---------------------------------------------------------------------------
