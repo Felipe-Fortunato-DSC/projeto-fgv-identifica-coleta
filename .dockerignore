@@ -1,0 +1,45 @@
+# Credenciais
+.env
+.env.*
+
+# Git / VCS
+.git
+.gitignore
+.gitattributes
+
+# Python build / cache
+__pycache__
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtualenvs
+.venv
+venv
+env
+ENV
+
+# IDEs
+.vscode
+.idea
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Streamlit local
+.streamlit/
+
+# Artefatos do projeto que não precisam ir na imagem
+*.xlsx
+generate_data.py
+fluxograma_pipeline.html
+
+# Docker
+Dockerfile
+.dockerignore
