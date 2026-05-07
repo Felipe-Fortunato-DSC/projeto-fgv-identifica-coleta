@@ -4,6 +4,7 @@ Cod_insumo e insumo_informado são buscados via LEFT JOIN em tbl_cadastrados_bp.
 """
 
 import os
+import unicodedata
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -25,31 +26,31 @@ OPTIONS_LOOKBACK_DAYS = 365
 RESULT_REUSE_MINUTES = 60
 
 VISIBLE_COLUMNS = [
-    "data_coleta", "plataforma", "cod_informante", "nome_informante",
-    "periodicidade", "tipo_preco", "cod_insumo", "ean", "sku",
-    "insumo_informado", "url", "descricao", "marca", "uf", "moeda",
-    "preco", "preco_promocional", "id_produto", "id_coleta", "id_imagem",
+    "data_coleta", "ean", "sku", "cod_insumo", "insumo_informado",
+    "descricao", "marca", "uf", "moeda", "preco", "preco_promocional",
+    "tipo_preco", "periodicidade", "cod_informante", "nome_informante",
+    "url", "plataforma", "id_produto", "id_coleta", "id_imagem",
 ]
 
 _BASE_SELECT = f"""
     SELECT
         cp.data_coleta,
-        cp.plataforma,
-        element_at(cp.cod_informante, 1) AS cod_informante,
-        cp.nome_informante,
-        cp.periodicidade,
-        cp.tipo_preco,
-        cb.cod_insumo,
         cp.ean,
         cp.sku,
+        cb.cod_insumo,
         cb.insumo_informado,
-        cp.url,
         cp.descricao,
         cp.marca,
         cp.uf,
         cp.moeda,
         cp.preco,
         cp.preco_promocional,
+        cp.tipo_preco,
+        cp.periodicidade,
+        element_at(cp.cod_informante, 1) AS cod_informante,
+        cp.nome_informante,
+        cp.url,
+        cp.plataforma,
         cp.id_produto,
         cp.id_coleta,
         cp.id_imagem
@@ -75,6 +76,11 @@ def get_conn():
 
 def _escape(val: str) -> str:
     return "'" + str(val).replace("'", "''") + "'"
+
+
+def _strip_accents(s: str) -> str:
+    nfd = unicodedata.normalize("NFD", s.lower())
+    return "".join(c for c in nfd if not unicodedata.combining(c))
 
 
 def _run_query(sql: str, reuse: bool = True) -> pd.DataFrame:
@@ -227,7 +233,19 @@ def _build_where(filters: dict) -> str:
         conditions.append(f"(cp.ean = {_escape(term)} OR cp.sku = {_escape(term)})")
     if filters.get("busca_texto"):
         term = filters["busca_texto"].strip()
-        conditions.append(f"LOWER(cp.descricao) LIKE LOWER({_escape('%' + term + '%')})")
+        tokens = [t for t in term.split() if t]
+        if tokens:
+            # Normaliza a coluna no Athena: lower + decompõe acentos (NFD) +
+            # remove marcas combinantes (\p{M}). Permite buscar "sabao" e
+            # casar com "sabão", em qualquer combinação de maiúsculas/acentos.
+            norm_col = r"regexp_replace(normalize(LOWER(cp.descricao), NFD), '\p{M}', '')"
+            # AND entre tokens => palavras podem aparecer em qualquer ordem
+            # e com qualquer texto entre elas.
+            like_parts = [
+                f"{norm_col} LIKE {_escape('%' + _strip_accents(tok) + '%')}"
+                for tok in tokens
+            ]
+            conditions.append("(" + " AND ".join(like_parts) + ")")
 
     return (" WHERE " + " AND ".join(conditions)) if conditions else ""
 

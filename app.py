@@ -264,8 +264,12 @@ def _render_filters(options: dict) -> dict:
             )
             busca_texto = st.text_input(
                 "Descrição",
-                placeholder="Ex: sabão pó nestlé...",
+                placeholder="Ex: nestle sabao po",
                 key=f"f_texto_{sfx}",
+                help=(
+                    "Busca por palavras em qualquer ordem e ignora acentos/maiúsculas. "
+                    "Ex.: 'nestle sabao po' encontra 'Sabão em Pó Nestlé 500g'."
+                ),
             )
             _insumo_inf_opts = (
                 options.get("insumo_informado_by_informante", {}).get(cod_inf, options.get("insumo_informado", []))
@@ -697,10 +701,14 @@ def _monitoramento_page() -> None:
         filtered = filtered[filtered["frete"] == frete]
     if st.session_state.get("mon_only_ativos", False):
         filtered = filtered[filtered["status"] == "Ativo"]
+    if st.session_state.get("mon_only_atraso", False):
+        filtered = filtered[filtered["execucao"] == "Atraso"]
 
     total = len(df)
     ativos = int((df["status"] == "Ativo").sum())
     inativos = int((df["status"] == "Inativo").sum())
+    coletas_concluidas = int((df["execucao"] == "Sucesso").sum())
+    coletas_atraso = int((df["execucao"] == "Atraso").sum())
 
     def _val(n: int) -> str:
         color = "#ffffff" if n > 0 else "#888888"
@@ -714,10 +722,16 @@ def _monitoramento_page() -> None:
                     <strong>Qtd. de Informantes:</strong> {_val(total)}
                 </span>
                 <span style="font-size:1.05rem; color:#ffffff;">
+                    <strong>Informantes Inativos:</strong> {_val(inativos)}
+                </span>
+                <span style="font-size:1.05rem; color:#ffffff;">
                     <strong>Informantes Ativos:</strong> {_val(ativos)}
                 </span>
                 <span style="font-size:1.05rem; color:#ffffff;">
-                    <strong>Informantes Inativos:</strong> {_val(inativos)}
+                    <strong>Coletas Concluídas:</strong> {_val(coletas_concluidas)}
+                </span>
+                <span style="font-size:1.05rem; color:#ffffff;">
+                    <strong>Coletas em Atraso:</strong> {_val(coletas_atraso)}
                 </span>
             </div>
             """,
@@ -728,6 +742,11 @@ def _monitoramento_page() -> None:
         "Informantes Ativos",
         key="mon_only_ativos",
         help="Filtrar apenas informantes com status Ativo",
+    )
+    st.toggle(
+        "Em Atraso",
+        key="mon_only_atraso",
+        help="Filtrar apenas informantes ativos cuja última coleta é anterior a hoje",
     )
 
     col_cfg = {
