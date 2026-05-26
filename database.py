@@ -18,7 +18,7 @@ TABLE_MONITORAMENTO = "db_scraping_spdo.tbl_ecommerce_informant_shipping_info_pr
 OPTIONS_LOOKBACK_DAYS = 365
 # Reuso de resultado de query do Athena — corta custo/latência em consultas
 # repetitivas. O workgroup precisa permitir reuso.
-RESULT_REUSE_MINUTES = 60
+RESULT_REUSE_MINUTES = 10
 
 VISIBLE_COLUMNS = [
     "data_coleta", "ean", "sku", "cod_insumo", "insumo_informado",
