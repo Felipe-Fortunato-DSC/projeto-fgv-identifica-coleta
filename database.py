@@ -1,8 +1,3 @@
-"""
-Camada de acesso a dados — consultas ao AWS Athena com filtros dinâmicos.
-Cod_insumo e insumo_informado são buscados via LEFT JOIN em tbl_cadastrados_bp.
-"""
-
 import os
 import unicodedata
 from contextlib import contextmanager
@@ -15,9 +10,9 @@ from pyathena import connect
 
 load_dotenv(Path(__file__).parent / ".env")
 
-TABLE_COLETA        = "db_scraping_spdo.tbl_ecommerce_spdo"
-TABLE_CADASTRO      = "db_scraping_spdo.tbl_cadastrados_bp"
-TABLE_MONITORAMENTO = "db_scraping_spdo.tbl_monitoramento"
+TABLE_COLETA        = "db_scraping_spdo.tbl_ecommerce_collect_prod"
+TABLE_CADASTRO      = "db_scraping_spdo.tbl_ecommerce_registered_ins_inform_prod"
+TABLE_MONITORAMENTO = "db_scraping_spdo.tbl_ecommerce_informant_shipping_info_prod"
 
 # Janela utilizada para alimentar opções de filtro (evita full-scan histórico).
 OPTIONS_LOOKBACK_DAYS = 365
@@ -29,7 +24,7 @@ VISIBLE_COLUMNS = [
     "data_coleta", "ean", "sku", "cod_insumo", "insumo_informado",
     "descricao", "marca", "uf", "moeda", "preco", "preco_promocional",
     "tipo_preco", "periodicidade", "cod_informante", "nome_informante",
-    "url", "plataforma", "id_produto", "id_coleta", "id_imagem",
+    "url", "plataforma", "id_produto", "id_coleta",
 ]
 
 _BASE_SELECT = f"""
@@ -52,11 +47,17 @@ _BASE_SELECT = f"""
         cp.url,
         cp.plataforma,
         cp.id_produto,
-        cp.id_coleta,
-        cp.id_imagem
+        cp.id_coleta
     FROM {TABLE_COLETA} cp
-    LEFT JOIN {TABLE_CADASTRO} cb
-        ON CAST(cb.cod_informante AS VARCHAR) = element_at(cp.cod_informante, 1)
+    LEFT JOIN (
+        SELECT CAST(cod_informante AS VARCHAR) AS cod_informante,
+               id_produto_site,
+               MAX(cod_insumo)       AS cod_insumo,
+               MAX(insumo_informado) AS insumo_informado
+        FROM {TABLE_CADASTRO}
+        GROUP BY CAST(cod_informante AS VARCHAR), id_produto_site
+    ) cb
+        ON cb.cod_informante = element_at(cp.cod_informante, 1)
         AND cb.id_produto_site = cp.id_produto
 """
 
@@ -228,9 +229,10 @@ def _build_where(filters: dict) -> str:
             f"AND cb2.cod_insumo IS NOT NULL"
             f")"
         )
-    if filters.get("ean_sku"):
-        term = filters["ean_sku"].strip()
-        conditions.append(f"(cp.ean = {_escape(term)} OR cp.sku = {_escape(term)})")
+    if filters.get("ean"):
+        conditions.append(f"cp.ean = {_escape(filters['ean'])}")
+    if filters.get("sku"):
+        conditions.append(f"cp.sku = {_escape(filters['sku'])}")
     if filters.get("busca_texto"):
         term = filters["busca_texto"].strip()
         tokens = [t for t in term.split() if t]
@@ -308,13 +310,13 @@ def save_cadastrado_bp(
 
 
 def get_monitoramento_data() -> pd.DataFrame:
-    """Retorna tbl_monitoramento enriquecida com status, tipo_preco e ultima_coleta do tbl_ecommerce."""
+    """Retorna tbl_ecommerce_informant_shipping_info_prod enriquecida com status, tipo_preco e ultima_coleta do tbl_ecommerce."""
     cutoff = (date.today() - timedelta(days=OPTIONS_LOOKBACK_DAYS)).isoformat()
     sql = f"""
         SELECT
-            CAST(m.cod_informante AS VARCHAR) AS cod_informante,
-            m.dominio,
-            m.frete,
+            CAST(m.cod_informante AS VARCHAR)                 AS cod_informante,
+            array_join(m.dominios, ', ')                      AS dominio,
+            CASE WHEN m.possui_frete THEN 'Sim' ELSE 'Não' END AS frete,
             CASE WHEN e.cod_informante IS NOT NULL THEN 'Ativo' ELSE 'Inativo' END AS status,
             e.tipo_preco,
             e.ultima_coleta
@@ -330,26 +332,310 @@ def get_monitoramento_data() -> pd.DataFrame:
         ) e ON CAST(m.cod_informante AS VARCHAR) = e.cod_informante
         ORDER BY CAST(m.cod_informante AS VARCHAR)
     """
-    try:
-        return _run_query(sql)
-    except Exception:
-        return pd.DataFrame(columns=["cod_informante", "dominio", "frete", "status", "tipo_preco", "ultima_coleta"])
+    return _run_query(sql)
 
 
-def get_carga_data() -> pd.DataFrame:
-    """Retorna todos os insumos cadastrados BP com cod_insumo e insumo_informado preenchidos."""
+def get_informantes_coletaram(date_ini: date, date_fim: date) -> set[str]:
+    """cod_informante distintos com pelo menos uma linha em
+    tbl_ecommerce_collect_prod cuja data_coleta caia no intervalo [date_ini, date_fim]."""
     sql = f"""
-        SELECT
-            CAST(cod_informante AS VARCHAR) AS cod_informante,
-            cod_insumo,
-            insumo_informado,
-            id_produto_site
-        FROM {TABLE_CADASTRO}
-        WHERE cod_insumo IS NOT NULL
-          AND insumo_informado IS NOT NULL
-        ORDER BY CAST(cod_informante AS VARCHAR), cod_insumo
+        SELECT DISTINCT element_at(cod_informante, 1) AS cod_informante
+        FROM {TABLE_COLETA}
+        WHERE TRY_CAST(data_coleta AS DATE) BETWEEN DATE '{date_ini}' AND DATE '{date_fim}'
+          AND cod_informante IS NOT NULL
+    """
+    df = _run_query(sql)
+    return set(df["cod_informante"].dropna().astype(str))
+
+
+def get_carga_data(filters: dict | None = None) -> pd.DataFrame:
+    """Insumos cadastrados (cod_insumo+insumo_informado) que possuam coleta
+    correspondente em tbl_ecommerce_collect_prod, únicos por id_produto_site.
+
+    Filtros opcionais:
+      - cod_informante: restringe cadastros a esse informante.
+      - data_exata: exige que exista coleta nessa data.
+    """
+    filters = filters or {}
+    cad_conds: list[str] = []
+    coleta_conds: list[str] = []
+
+    if filters.get("cod_informante"):
+        cad_conds.append(f"CAST(cb.cod_informante AS VARCHAR) = {_escape(filters['cod_informante'])}")
+        coleta_conds.append(
+            f"element_at(cp.cod_informante, 1) = {_escape(filters['cod_informante'])}"
+        )
+    if filters.get("data_exata"):
+        coleta_conds.append(
+            f"TRY_CAST(cp.data_coleta AS DATE) = DATE '{filters['data_exata']}'"
+        )
+
+    extra_cad = ("\n              AND " + "\n              AND ".join(cad_conds)) if cad_conds else ""
+    extra_coleta = ("\n                    AND " + "\n                    AND ".join(coleta_conds)) if coleta_conds else ""
+
+    sql = f"""
+        SELECT DISTINCT
+            CAST(cb.cod_informante AS VARCHAR) AS cod_informante,
+            cb.cod_insumo,
+            cb.insumo_informado,
+            cb.id_produto_site
+        FROM {TABLE_CADASTRO} cb
+        WHERE cb.cod_insumo IS NOT NULL
+          AND cb.insumo_informado IS NOT NULL{extra_cad}
+          AND EXISTS (
+              SELECT 1 FROM {TABLE_COLETA} cp
+              WHERE element_at(cp.cod_informante, 1) = CAST(cb.cod_informante AS VARCHAR)
+                AND cp.id_produto = cb.id_produto_site{extra_coleta}
+          )
+        ORDER BY 1, 2
     """
     try:
-        return _run_query(sql)
+        return _run_query(sql, reuse=False)
     except Exception:
         return pd.DataFrame(columns=["cod_informante", "cod_insumo", "insumo_informado", "id_produto_site"])
+
+
+def get_prices_for_keys(keys: list[tuple[str, str]]) -> pd.DataFrame:
+    """Para cada (cod_informante, id_produto), devolve a coleta mais recente."""
+    if not keys:
+        return pd.DataFrame(columns=VISIBLE_COLUMNS)
+    cods = sorted({k[0] for k in keys})
+    prods = sorted({k[1] for k in keys})
+    cods_in  = ", ".join(_escape(c) for c in cods)
+    prods_in = ", ".join(_escape(p) for p in prods)
+    sql = f"""
+        SELECT * FROM (
+            SELECT
+                cp.data_coleta, cp.ean, cp.sku, cp.descricao, cp.marca,
+                cp.uf, cp.moeda, cp.preco, cp.preco_promocional,
+                cp.tipo_preco, cp.periodicidade,
+                element_at(cp.cod_informante, 1) AS cod_informante,
+                cp.nome_informante, cp.url, cp.plataforma,
+                cp.id_produto, cp.id_coleta,
+                ROW_NUMBER() OVER (
+                    PARTITION BY element_at(cp.cod_informante, 1), cp.id_produto
+                    ORDER BY cp.data_coleta DESC
+                ) AS rn
+            FROM {TABLE_COLETA} cp
+            WHERE element_at(cp.cod_informante, 1) IN ({cods_in})
+              AND cp.id_produto IN ({prods_in})
+        )
+        WHERE rn = 1
+    """
+    try:
+        df = _run_query(sql, reuse=False).drop(columns=["rn"], errors="ignore")
+    except Exception:
+        return pd.DataFrame(columns=VISIBLE_COLUMNS)
+
+    # Pós-filtro: o IN cruzado pode incluir pares não desejados.
+    keys_set = {(c, p) for c, p in keys}
+    if not df.empty:
+        df = df[df.apply(
+            lambda r: (r["cod_informante"], r["id_produto"]) in keys_set, axis=1
+        )].reset_index(drop=True)
+    return df
+
+
+def get_prices_by_insumo_informado(pairs: list[tuple[str, str]]) -> pd.DataFrame:
+    """Para cada (cod_informante, insumo_informado), devolve o preço mais
+    recente coletado em tbl_ecommerce_collect_prod, fazendo a ponte por
+    tbl_ecommerce_registered_ins_inform_prod.insumo_informado.
+
+    Usado pela aba Carga para enriquecer a encomenda com o preço fresco do
+    scraping. Retorna colunas: cod_informante, insumo_informado, preco, data_coleta.
+    Levanta exceção em falha de query — o caller (UI) mostra o erro ao usuário.
+    """
+    if not pairs:
+        return pd.DataFrame(columns=["cod_informante", "insumo_informado", "preco", "data_coleta", "url"])
+    cods = sorted({p[0] for p in pairs})
+    infs = sorted({p[1] for p in pairs})
+    cods_in = ", ".join(_escape(c) for c in cods)
+    infs_in = ", ".join(_escape(i) for i in infs)
+    sql = f"""
+        WITH bridge AS (
+            SELECT
+                TRIM(CAST(cb.cod_informante AS VARCHAR)) AS cod_informante,
+                TRIM(CAST(cb.insumo_informado AS VARCHAR)) AS insumo_informado,
+                cb.id_produto_site
+            FROM {TABLE_CADASTRO} cb
+            WHERE TRIM(CAST(cb.cod_informante AS VARCHAR)) IN ({cods_in})
+              AND TRIM(CAST(cb.insumo_informado AS VARCHAR)) IN ({infs_in})
+        ),
+        prices AS (
+            SELECT
+                element_at(cp.cod_informante, 1) AS cod_informante,
+                cp.id_produto,
+                cp.preco,
+                cp.data_coleta,
+                cp.url,
+                ROW_NUMBER() OVER (
+                    PARTITION BY element_at(cp.cod_informante, 1), cp.id_produto
+                    ORDER BY cp.data_coleta DESC
+                ) AS rn
+            FROM {TABLE_COLETA} cp
+            WHERE element_at(cp.cod_informante, 1) IN ({cods_in})
+        )
+        SELECT b.cod_informante, b.insumo_informado, p.preco, p.data_coleta, p.url
+        FROM bridge b
+        LEFT JOIN prices p
+          ON b.cod_informante = p.cod_informante
+         AND b.id_produto_site = p.id_produto
+         AND p.rn = 1
+    """
+    df = _run_query(sql, reuse=False)
+
+    pairs_set = {(c, i) for c, i in pairs}
+    if not df.empty:
+        df = df[df.apply(
+            lambda r: (r["cod_informante"], r["insumo_informado"]) in pairs_set, axis=1
+        )].reset_index(drop=True)
+    return df
+
+
+def find_coletados_by_urls(cod_informante: str, urls: list[str]) -> pd.DataFrame:
+    """Para cada URL em `urls`, devolve a coleta mais recente em
+    tbl_ecommerce_collect_prod cuja `cp.url` é EXATAMENTE igual à URL solicitada
+    para o `cod_informante` dado. Match case-sensitive, sem normalização.
+
+    Devolve colunas: cod_informante, id_produto, url, descricao, data_coleta.
+    Usado pelo cadastramento automático para casar URL_DO_INSUMO da encomenda
+    contra a URL efetivamente coletada pelo scraping.
+    """
+    if not urls:
+        return pd.DataFrame(
+            columns=["cod_informante", "id_produto", "url", "descricao", "data_coleta"]
+        )
+    urls_in = ", ".join(_escape(u) for u in urls)
+    sql = f"""
+        SELECT * FROM (
+            SELECT
+                element_at(cp.cod_informante, 1) AS cod_informante,
+                cp.id_produto,
+                cp.url,
+                cp.descricao,
+                cp.data_coleta,
+                ROW_NUMBER() OVER (
+                    PARTITION BY cp.url
+                    ORDER BY cp.data_coleta DESC
+                ) AS rn
+            FROM {TABLE_COLETA} cp
+            WHERE element_at(cp.cod_informante, 1) = {_escape(cod_informante)}
+              AND cp.url IN ({urls_in})
+        )
+        WHERE rn = 1
+    """
+    df = _run_query(sql, reuse=False).drop(columns=["rn"], errors="ignore")
+    if not df.empty:
+        df["data_coleta"] = pd.to_datetime(df["data_coleta"], errors="coerce").dt.date
+    return df
+
+
+def get_existing_cadastros(cod_informante: str) -> set[tuple[str, str]]:
+    """Pares (cod_informante, id_produto_site) já presentes em
+    tbl_ecommerce_registered_ins_inform_prod para o informante dado. Usado para
+    evitar propor cadastros duplicados no fluxo automático."""
+    sql = f"""
+        SELECT DISTINCT
+            CAST(cb.cod_informante AS VARCHAR) AS cod_informante,
+            CAST(cb.id_produto_site AS VARCHAR) AS id_produto_site
+        FROM {TABLE_CADASTRO} cb
+        WHERE CAST(cb.cod_informante AS VARCHAR) = {_escape(cod_informante)}
+          AND cb.id_produto_site IS NOT NULL
+    """
+    df = _run_query(sql, reuse=False)
+    if df.empty:
+        return set()
+    return set(zip(
+        df["cod_informante"].astype(str),
+        df["id_produto_site"].astype(str),
+    ))
+
+
+def get_informantes_in_bp(cod_informantes: list[str]) -> set[str]:
+    """Subconjunto de `cod_informantes` que possui ao menos um registro em
+    tbl_ecommerce_registered_ins_inform_prod (independente do insumo).
+
+    Usado pela crítica geral para distinguir informantes ativos em BP
+    (que poderiam ter coletas) de informantes sem qualquer cadastro.
+    """
+    if not cod_informantes:
+        return set()
+    cods = sorted({str(c).strip() for c in cod_informantes if str(c).strip()})
+    if not cods:
+        return set()
+    cods_in = ", ".join(_escape(c) for c in cods)
+    sql = f"""
+        SELECT DISTINCT TRIM(CAST(cb.cod_informante AS VARCHAR)) AS cod_informante
+        FROM {TABLE_CADASTRO} cb
+        WHERE TRIM(CAST(cb.cod_informante AS VARCHAR)) IN ({cods_in})
+    """
+    df = _run_query(sql, reuse=False)
+    if df.empty:
+        return set()
+    return set(df["cod_informante"].dropna().astype(str))
+
+
+def get_cadastrados_bp_sample(cod_informante: str, limit: int = 30) -> pd.DataFrame:
+    """Diagnóstico: amostra de tbl_ecommerce_registered_ins_inform_prod para um informante.
+    Útil para entender o conteúdo real da coluna insumo_informado quando o
+    join contra a encomenda não retorna nada."""
+    sql = f"""
+        SELECT TRIM(CAST(cb.cod_informante AS VARCHAR)) AS cod_informante,
+               TRIM(CAST(cb.insumo_informado AS VARCHAR)) AS insumo_informado,
+               cb.cod_insumo,
+               cb.id_produto_site
+        FROM {TABLE_CADASTRO} cb
+        WHERE TRIM(CAST(cb.cod_informante AS VARCHAR)) = {_escape(cod_informante)}
+        LIMIT {int(limit)}
+    """
+    return _run_query(sql, reuse=False)
+
+
+def get_critica_data() -> pd.DataFrame:
+    """Coletas cujo preço atual subiu mais de 30% em relação à coleta
+    imediatamente anterior do mesmo (cod_informante, id_produto)."""
+    sql = f"""
+        WITH ranked AS (
+            SELECT
+                element_at(cp.cod_informante, 1) AS cod_informante,
+                cp.nome_informante,
+                cp.id_produto,
+                cp.descricao,
+                cp.marca,
+                cp.data_coleta,
+                cp.preco,
+                ROW_NUMBER() OVER (
+                    PARTITION BY element_at(cp.cod_informante, 1), cp.id_produto
+                    ORDER BY cp.data_coleta DESC
+                ) AS rn
+            FROM {TABLE_COLETA} cp
+            WHERE cp.preco IS NOT NULL AND cp.preco > 0
+        )
+        SELECT
+            a.cod_informante,
+            a.nome_informante,
+            a.id_produto,
+            a.descricao,
+            a.marca,
+            b.data_coleta AS data_anterior,
+            b.preco       AS preco_anterior,
+            a.data_coleta AS data_atual,
+            a.preco       AS preco_atual,
+            ((a.preco - b.preco) / b.preco) * 100.0 AS variacao_pct
+        FROM ranked a
+        JOIN ranked b
+          ON a.cod_informante = b.cod_informante
+         AND a.id_produto    = b.id_produto
+         AND a.rn = 1 AND b.rn = 2
+        WHERE a.preco > b.preco * 1.30
+        ORDER BY variacao_pct DESC
+    """
+    try:
+        return _run_query(sql, reuse=False)
+    except Exception:
+        return pd.DataFrame(columns=[
+            "cod_informante", "nome_informante", "id_produto", "descricao", "marca",
+            "data_anterior", "preco_anterior", "data_atual", "preco_atual", "variacao_pct",
+        ])
+
+

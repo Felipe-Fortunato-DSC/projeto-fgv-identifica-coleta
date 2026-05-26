@@ -37,3 +37,6 @@ desktop.ini
 
 # Arquivos de exportação gerados
 *.xlsx
+
+
+.claude/
