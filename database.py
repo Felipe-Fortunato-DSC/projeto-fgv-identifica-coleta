@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
+from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
 from pyathena import connect
 
@@ -62,13 +63,49 @@ _BASE_SELECT = f"""
 """
 
 
+def _sso_hint() -> str:
+    profile = os.environ.get("AWS_PROFILE", "<seu-perfil>")
+    return (
+        "Falha ao obter credenciais AWS para o Athena.\n"
+        "Para testar localmente com AWS SSO, rode no terminal:\n"
+        f"    aws sso login --profile {profile}\n"
+        "e confirme que AWS_PROFILE e AWS_DEFAULT_REGION estão definidos no .env."
+    )
+
+
+def _is_credential_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    needles = (
+        "sso", "token", "expired", "unable to locate credentials",
+        "the security token", "credential", "forbidden", "accessdenied",
+    )
+    return any(n in msg for n in needles)
+
+
 @contextmanager
 def get_conn():
-    conn = connect(
-        s3_staging_dir=os.environ["ATHENA_S3_STAGING_DIR"],
-        region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-        work_group="primary",
-    )
+    """Abre conexão com o Athena usando a cadeia de credenciais padrão do boto3.
+
+    - Local (SSO): defina AWS_PROFILE (perfil configurado via `aws configure sso`)
+      no .env e rode `aws sso login --profile <perfil>` antes de subir a app.
+    - Container/EC2/ECS: usa a role da task/instância (sem AWS_PROFILE no ambiente).
+    """
+    kwargs = {
+        "s3_staging_dir": os.environ["ATHENA_S3_STAGING_DIR"],
+        "region_name": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        "work_group": os.environ.get("ATHENA_WORKGROUP", "primary"),
+    }
+    # Passa o perfil explicitamente quando definido — facilita o login SSO local.
+    profile = os.environ.get("AWS_PROFILE")
+    if profile:
+        kwargs["profile_name"] = profile
+
+    try:
+        conn = connect(**kwargs)
+    except (BotoCoreError, ClientError) as exc:
+        if _is_credential_error(exc):
+            raise RuntimeError(_sso_hint()) from exc
+        raise
     try:
         yield conn
     finally:
@@ -85,21 +122,26 @@ def _strip_accents(s: str) -> str:
 
 
 def _run_query(sql: str, reuse: bool = True) -> pd.DataFrame:
-    with get_conn() as conn:
-        cursor = conn.cursor()
-        try:
-            if reuse:
-                cursor.execute(
-                    sql,
-                    result_reuse_enable=True,
-                    result_reuse_minutes=RESULT_REUSE_MINUTES,
-                )
-            else:
+    try:
+        with get_conn() as conn:
+            cursor = conn.cursor()
+            try:
+                if reuse:
+                    cursor.execute(
+                        sql,
+                        result_reuse_enable=True,
+                        result_reuse_minutes=RESULT_REUSE_MINUTES,
+                    )
+                else:
+                    cursor.execute(sql)
+            except TypeError:
                 cursor.execute(sql)
-        except TypeError:
-            cursor.execute(sql)
-        cols = [d[0] for d in cursor.description]
-        return pd.DataFrame(cursor.fetchall(), columns=cols)
+            cols = [d[0] for d in cursor.description]
+            return pd.DataFrame(cursor.fetchall(), columns=cols)
+    except (BotoCoreError, ClientError) as exc:
+        if _is_credential_error(exc):
+            raise RuntimeError(_sso_hint()) from exc
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +432,7 @@ def get_carga_data(filters: dict | None = None) -> pd.DataFrame:
         ORDER BY 1, 2
     """
     try:
-        return _run_query(sql, reuse=False)
+        return _run_query(sql, reuse=True)
     except Exception:
         return pd.DataFrame(columns=["cod_informante", "cod_insumo", "insumo_informado", "id_produto_site"])
 
@@ -423,7 +465,7 @@ def get_prices_for_keys(keys: list[tuple[str, str]]) -> pd.DataFrame:
         WHERE rn = 1
     """
     try:
-        df = _run_query(sql, reuse=False).drop(columns=["rn"], errors="ignore")
+        df = _run_query(sql, reuse=True).drop(columns=["rn"], errors="ignore")
     except Exception:
         return pd.DataFrame(columns=VISIBLE_COLUMNS)
 
@@ -482,7 +524,7 @@ def get_prices_by_insumo_informado(pairs: list[tuple[str, str]]) -> pd.DataFrame
          AND b.id_produto_site = p.id_produto
          AND p.rn = 1
     """
-    df = _run_query(sql, reuse=False)
+    df = _run_query(sql, reuse=True)
 
     pairs_set = {(c, i) for c, i in pairs}
     if not df.empty:
@@ -524,7 +566,7 @@ def find_coletados_by_urls(cod_informante: str, urls: list[str]) -> pd.DataFrame
         )
         WHERE rn = 1
     """
-    df = _run_query(sql, reuse=False).drop(columns=["rn"], errors="ignore")
+    df = _run_query(sql, reuse=True).drop(columns=["rn"], errors="ignore")
     if not df.empty:
         df["data_coleta"] = pd.to_datetime(df["data_coleta"], errors="coerce").dt.date
     return df
@@ -542,7 +584,7 @@ def get_existing_cadastros(cod_informante: str) -> set[tuple[str, str]]:
         WHERE CAST(cb.cod_informante AS VARCHAR) = {_escape(cod_informante)}
           AND cb.id_produto_site IS NOT NULL
     """
-    df = _run_query(sql, reuse=False)
+    df = _run_query(sql, reuse=True)
     if df.empty:
         return set()
     return set(zip(
@@ -569,7 +611,7 @@ def get_informantes_in_bp(cod_informantes: list[str]) -> set[str]:
         FROM {TABLE_CADASTRO} cb
         WHERE TRIM(CAST(cb.cod_informante AS VARCHAR)) IN ({cods_in})
     """
-    df = _run_query(sql, reuse=False)
+    df = _run_query(sql, reuse=True)
     if df.empty:
         return set()
     return set(df["cod_informante"].dropna().astype(str))
@@ -588,7 +630,7 @@ def get_cadastrados_bp_sample(cod_informante: str, limit: int = 30) -> pd.DataFr
         WHERE TRIM(CAST(cb.cod_informante AS VARCHAR)) = {_escape(cod_informante)}
         LIMIT {int(limit)}
     """
-    return _run_query(sql, reuse=False)
+    return _run_query(sql, reuse=True)
 
 
 def get_critica_data() -> pd.DataFrame:
@@ -631,7 +673,7 @@ def get_critica_data() -> pd.DataFrame:
         ORDER BY variacao_pct DESC
     """
     try:
-        return _run_query(sql, reuse=False)
+        return _run_query(sql, reuse=True)
     except Exception:
         return pd.DataFrame(columns=[
             "cod_informante", "nome_informante", "id_produto", "descricao", "marca",
