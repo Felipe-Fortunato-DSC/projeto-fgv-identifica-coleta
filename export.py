@@ -152,6 +152,7 @@ CARGA_REAL_COLUMNS: list[tuple[str, str | None, str]] = [
     ("FT",                                   None,                       "text"),
     ("Justificativa Livre",                  "DS_OBS_PRECCOL",           "text"),
     ("URL Insumo Informado",                 "URL_DO_INSUMO",            "text"),
+    ("Arquivo com Preço",                    None,                       "text"),
     ("Nome Insumo",                          "NM_INSUMO",                "text"),
     ("Característica Insumo",                "DS_INSUMO",                "text"),
     ("Especificação Insumo",                 None,                       "text"),
